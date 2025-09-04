@@ -1,0 +1,39 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+*.egg-info/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+
+# Docker
+*.log
+
+# Testing
+.coverage
+.pytest_cache/
+htmlcov/
+
+# OS
+Thumbs.db
+Desktop.ini

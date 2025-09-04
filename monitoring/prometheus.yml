@@ -1,0 +1,625 @@
+# monitoring/prometheus.yml - Prometheus Configuration
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+  external_labels:
+    cluster: 'agentic-ai'
+    environment: 'production'
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
+# Load rules
+rule_files:
+  - "alerts.yml"
+
+# Scrape configurations
+scrape_configs:
+  # Kubernetes service discovery
+  - job_name: 'kubernetes-apiservers'
+    kubernetes_sd_configs:
+      - role: endpoints
+    scheme: https
+    tls_config:
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+        action: keep
+        regex: default;kubernetes;https
+
+  # Node metrics
+  - job_name: 'kubernetes-nodes'
+    kubernetes_sd_configs:
+      - role: node
+    scheme: https
+    tls_config:
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    relabel_configs:
+      - action: labelmap
+        regex: __meta_kubernetes_node_label_(.+)
+
+  # Pod metrics
+  - job_name: 'kubernetes-pods'
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names:
+            - agentic-ai
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: true
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+      - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        action: replace
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+        target_label: __address__
+      - action: labelmap
+        regex: __meta_kubernetes_pod_label_(.+)
+      - source_labels: [__meta_kubernetes_namespace]
+        action: replace
+        target_label: kubernetes_namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        action: replace
+        target_label: kubernetes_pod_name
+
+  # Application metrics
+  - job_name: 'orchestrator'
+    static_configs:
+      - targets: ['orchestrator:9090']
+    metrics_path: '/metrics'
+
+  - job_name: 'api-gateway'
+    static_configs:
+      - targets: ['api-gateway:8000']
+    metrics_path: '/metrics'
+
+  - job_name: 'control-plane'
+    static_configs:
+      - targets: 
+          - 'control-plane:8081'
+          - 'control-plane:8082'
+          - 'control-plane:8083'
+    metrics_path: '/metrics'
+
+  # Infrastructure metrics
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis-exporter:9121']
+
+  - job_name: 'postgresql'
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+
+  - job_name: 'nats'
+    static_configs:
+      - targets: ['nats:8222']
+    metrics_path: '/metrics'
+
+  # GPU metrics
+  - job_name: 'nvidia-gpu'
+    static_configs:
+      - targets: ['nvidia-dcgm-exporter:9400']
+
+---
+# monitoring/alerts.yml - Alert Rules
+groups:
+  - name: orchestrator
+    interval: 30s
+    rules:
+      - alert: HighTaskFailureRate
+        expr: |
+          sum(rate(task_failures_total[5m])) / sum(rate(task_completions_total[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: critical
+          component: orchestrator
+        annotations:
+          summary: "High task failure rate detected"
+          description: "Task failure rate is {{ $value | humanizePercentage }} over the last 5 minutes"
+
+      - alert: TaskQueueBacklog
+        expr: task_queue_size > 1000
+        for: 15m
+        labels:
+          severity: warning
+          component: execution
+        annotations:
+          summary: "Large task queue backlog"
+          description: "Task queue has {{ $value }} pending tasks"
+
+      - alert: OrchestratorDown
+        expr: up{job="orchestrator"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: orchestrator
+        annotations:
+          summary: "Orchestrator is down"
+          description: "Orchestrator instance {{ $labels.instance }} is down"
+
+  - name: api
+    rules:
+      - alert: HighAPILatency
+        expr: |
+          histogram_quantile(0.95, rate(api_request_duration_seconds_bucket[5m])) > 2
+        for: 10m
+        labels:
+          severity: warning
+          component: api-gateway
+        annotations:
+          summary: "High API latency"
+          description: "95th percentile API latency is {{ $value }}s"
+
+      - alert: RateLimitExceeded
+        expr: sum(rate(api_rate_limit_hits_total[5m])) > 100
+        for: 5m
+        labels:
+          severity: warning
+          component: api-gateway
+        annotations:
+          summary: "High rate limit violations"
+          description: "{{ $value }} rate limit hits per second"
+
+      - alert: APIErrors
+        expr: |
+          sum(rate(api_requests_total{status=~"5.."}[5m])) / sum(rate(api_requests_total[5m])) > 0.05
+        for: 10m
+        labels:
+          severity: critical
+          component: api-gateway
+        annotations:
+          summary: "High API error rate"
+          description: "API error rate is {{ $value | humanizePercentage }}"
+
+  - name: models
+    rules:
+      - alert: ModelInferenceTimeout
+        expr: model_inference_timeouts_total > 10
+        for: 5m
+        labels:
+          severity: warning
+          component: agent
+        annotations:
+          summary: "Model inference timeouts"
+          description: "Model {{ $labels.model }} has {{ $value }} timeouts"
+
+      - alert: HighModelCost
+        expr: sum(rate(model_cost_usd[1h])) > 100
+        for: 30m
+        labels:
+          severity: warning
+          component: cost
+        annotations:
+          summary: "High model inference costs"
+          description: "Model costs are ${{ $value }}/hour"
+
+      - alert: GPUUtilization
+        expr: nvidia_gpu_utilization_percentage < 50
+        for: 30m
+        labels:
+          severity: info
+          component: gpu
+        annotations:
+          summary: "Low GPU utilization"
+          description: "GPU {{ $labels.gpu }} utilization is {{ $value }}%"
+
+  - name: infrastructure
+    rules:
+      - alert: HighMemoryUsage
+        expr: |
+          (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes > 0.9
+        for: 10m
+        labels:
+          severity: warning
+          component: infrastructure
+        annotations:
+          summary: "High memory usage"
+          description: "Node {{ $labels.instance }} memory usage is {{ $value | humanizePercentage }}"
+
+      - alert: DiskSpaceLow
+        expr: |
+          node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"} < 0.1
+        for: 15m
+        labels:
+          severity: critical
+          component: infrastructure
+        annotations:
+          summary: "Low disk space"
+          description: "Node {{ $labels.instance }} has {{ $value | humanizePercentage }} disk space remaining"
+
+      - alert: RedisDown
+        expr: up{job="redis"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: redis
+        annotations:
+          summary: "Redis is down"
+          description: "Redis instance {{ $labels.instance }} is down"
+
+      - alert: PostgresDown
+        expr: up{job="postgresql"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: postgres
+        annotations:
+          summary: "PostgreSQL is down"
+          description: "PostgreSQL instance {{ $labels.instance }} is down"
+
+  - name: circuit-breakers
+    rules:
+      - alert: CircuitBreakerOpen
+        expr: circuit_breaker_state == 1
+        for: 5m
+        labels:
+          severity: warning
+          component: circuit-breaker
+        annotations:
+          summary: "Circuit breaker open"
+          description: "Circuit breaker for {{ $labels.service }} is open"
+
+      - alert: CircuitBreakerFlapping
+        expr: changes(circuit_breaker_state[30m]) > 5
+        for: 10m
+        labels:
+          severity: warning
+          component: circuit-breaker
+        annotations:
+          summary: "Circuit breaker flapping"
+          description: "Circuit breaker for {{ $labels.service }} changed state {{ $value }} times"
+
+  - name: costs
+    rules:
+      - alert: MonthlyBudgetExceeded
+        expr: monthly_cost_usd > monthly_budget_usd
+        for: 1h
+        labels:
+          severity: critical
+          component: billing
+        annotations:
+          summary: "Monthly budget exceeded"
+          description: "Tenant {{ $labels.tenant_id }} exceeded budget: ${{ $value }}"
+
+      - alert: CostAnomaly
+        expr: |
+          daily_cost_usd > 2 * avg_over_time(daily_cost_usd[7d])
+        for: 2h
+        labels:
+          severity: warning
+          component: billing
+        annotations:
+          summary: "Cost anomaly detected"
+          description: "Daily cost ${{ $value }} is 2x the 7-day average"
+
+---
+# monitoring/grafana-dashboard.json - Main Dashboard
+{
+  "dashboard": {
+    "title": "Agentic AI Platform",
+    "panels": [
+      {
+        "title": "Task Processing Overview",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum(rate(tasks_total[5m])) by (status)",
+            "legendFormat": "{{ status }}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+      },
+      {
+        "title": "Active Tasks by Priority",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum(task_queue_size) by (priority)",
+            "legendFormat": "{{ priority }}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+      },
+      {
+        "title": "Model Usage",
+        "type": "piechart",
+        "targets": [
+          {
+            "expr": "sum(rate(model_invocations_total[1h])) by (model)"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8}
+      },
+      {
+        "title": "API Latency (p50, p95, p99)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.5, rate(api_request_duration_seconds_bucket[5m]))",
+            "legendFormat": "p50"
+          },
+          {
+            "expr": "histogram_quantile(0.95, rate(api_request_duration_seconds_bucket[5m]))",
+            "legendFormat": "p95"
+          },
+          {
+            "expr": "histogram_quantile(0.99, rate(api_request_duration_seconds_bucket[5m]))",
+            "legendFormat": "p99"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 8, "x": 8, "y": 8}
+      },
+      {
+        "title": "Cost Tracking",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "sum(daily_cost_usd)",
+            "legendFormat": "Today"
+          },
+          {
+            "expr": "sum(monthly_cost_usd)",
+            "legendFormat": "This Month"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 8, "x": 16, "y": 8}
+      },
+      {
+        "title": "Circuit Breaker Status",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "circuit_breaker_state",
+            "format": "table"
+          }
+        ],
+        "gridPos": {"h": 6, "w": 12, "x": 0, "y": 16}
+      },
+      {
+        "title": "Error Rate by Service",
+        "type": "heatmap",
+        "targets": [
+          {
+            "expr": "sum(rate(errors_total[5m])) by (service, error_type)"
+          }
+        ],
+        "gridPos": {"h": 6, "w": 12, "x": 12, "y": 16}
+      }
+    ],
+    "refresh": "30s",
+    "time": {
+      "from": "now-6h",
+      "to": "now"
+    }
+  }
+}
+
+---
+# monitoring/jaeger-config.yml - Distributed Tracing
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jaeger-config
+  namespace: agentic-ai
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+    
+    processors:
+      batch:
+        timeout: 1s
+        send_batch_size: 1024
+      
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 512
+      
+      attributes:
+        actions:
+          - key: environment
+            value: production
+            action: upsert
+          - key: service.namespace
+            value: agentic-ai
+            action: upsert
+    
+    exporters:
+      jaeger:
+        endpoint: jaeger-collector:14250
+        tls:
+          insecure: true
+      
+      prometheus:
+        endpoint: "0.0.0.0:8889"
+    
+    extensions:
+      health_check:
+        endpoint: :13133
+      pprof:
+        endpoint: :6060
+      zpages:
+        endpoint: :55679
+    
+    service:
+      extensions: [health_check, pprof, zpages]
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, batch, attributes]
+          exporters: [jaeger]
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [prometheus]
+
+---
+# monitoring/logging.yml - Centralized Logging with Fluentd
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluentd-config
+  namespace: agentic-ai
+data:
+  fluent.conf: |
+    <source>
+      @type tail
+      path /var/log/containers/*.log
+      pos_file /var/log/fluentd-containers.log.pos
+      tag kubernetes.*
+      read_from_head true
+      <parse>
+        @type json
+        time_format %Y-%m-%dT%H:%M:%S.%NZ
+      </parse>
+    </source>
+    
+    <filter kubernetes.**>
+      @type kubernetes_metadata
+      @id filter_kube_metadata
+      kubernetes_url "#{ENV['FLUENT_FILTER_KUBERNETES_URL'] || 'https://' + ENV['KUBERNETES_SERVICE_HOST'] + ':' + ENV['KUBERNETES_SERVICE_PORT'] + '/api'}"
+      verify_ssl "#{ENV['KUBERNETES_VERIFY_SSL'] || true}"
+    </filter>
+    
+    <filter kubernetes.var.log.containers.**.log>
+      @type parser
+      key_name log
+      reserve_data true
+      remove_key_name_field true
+      <parse>
+        @type json
+      </parse>
+    </filter>
+    
+    <filter kubernetes.**>
+      @type record_transformer
+      <record>
+        environment "#{ENV['ENVIRONMENT'] || 'production'}"
+        cluster_name "#{ENV['CLUSTER_NAME'] || 'agentic-ai'}"
+      </record>
+    </filter>
+    
+    <match kubernetes.var.log.containers.**agentic-ai**.log>
+      @type elasticsearch
+      @id out_es
+      @log_level info
+      include_tag_key true
+      host "#{ENV['FLUENT_ELASTICSEARCH_HOST'] || 'elasticsearch'}"
+      port "#{ENV['FLUENT_ELASTICSEARCH_PORT'] || '9200'}"
+      path "#{ENV['FLUENT_ELASTICSEARCH_PATH']}"
+      scheme "#{ENV['FLUENT_ELASTICSEARCH_SCHEME'] || 'http'}"
+      ssl_verify "#{ENV['FLUENT_ELASTICSEARCH_SSL_VERIFY'] || 'true'}"
+      ssl_version "#{ENV['FLUENT_ELASTICSEARCH_SSL_VERSION'] || 'TLSv1_2'}"
+      user "#{ENV['FLUENT_ELASTICSEARCH_USER']}"
+      password "#{ENV['FLUENT_ELASTICSEARCH_PASSWORD']}"
+      reload_connections "#{ENV['FLUENT_ELASTICSEARCH_RELOAD_CONNECTIONS'] || 'false'}"
+      reconnect_on_error true
+      reload_on_failure true
+      log_es_400_reason false
+      logstash_prefix "#{ENV['FLUENT_ELASTICSEARCH_LOGSTASH_PREFIX'] || 'agentic-ai'}"
+      logstash_dateformat "#{ENV['FLUENT_ELASTICSEARCH_LOGSTASH_DATEFORMAT'] || '%Y.%m.%d'}"
+      logstash_format "#{ENV['FLUENT_ELASTICSEARCH_LOGSTASH_FORMAT'] || 'true'}"
+      index_name "#{ENV['FLUENT_ELASTICSEARCH_LOGSTASH_INDEX_NAME'] || 'agentic-ai'}"
+      target_index_key "#{ENV['FLUENT_ELASTICSEARCH_TARGET_INDEX_KEY']}"
+      type_name "#{ENV['FLUENT_ELASTICSEARCH_LOGSTASH_TYPE_NAME'] || 'fluentd'}"
+      include_timestamp "#{ENV['FLUENT_ELASTICSEARCH_INCLUDE_TIMESTAMP'] || 'false'}"
+      template_name "#{ENV['FLUENT_ELASTICSEARCH_TEMPLATE_NAME'] || 'agentic-ai'}"
+      template_file "#{ENV['FLUENT_ELASTICSEARCH_TEMPLATE_FILE']}"
+      template_overwrite "#{ENV['FLUENT_ELASTICSEARCH_TEMPLATE_OVERWRITE'] || 'false'}"
+      request_timeout "#{ENV['FLUENT_ELASTICSEARCH_REQUEST_TIMEOUT'] || '5s'}"
+      <buffer>
+        @type file
+        path /var/log/fluentd-buffers/kubernetes.system.buffer
+        flush_mode interval
+        retry_type exponential_backoff
+        flush_thread_count 2
+        flush_interval 5s
+        retry_forever
+        retry_max_interval 30
+        chunk_limit_size "#{ENV['FLUENT_ELASTICSEARCH_BUFFER_CHUNK_LIMIT_SIZE'] || '2M'}"
+        queue_limit_length "#{ENV['FLUENT_ELASTICSEARCH_BUFFER_QUEUE_LIMIT_LENGTH'] || '8'}"
+        overflow_action block
+      </buffer>
+    </match>
+
+---
+# monitoring/slo.yaml - Service Level Objectives
+apiVersion: sloth.slok.dev/v1
+kind: PrometheusServiceLevel
+metadata:
+  name: agentic-ai-slos
+  namespace: agentic-ai
+spec:
+  service: agentic-ai
+  labels:
+    team: platform
+    tier: production
+  slos:
+    - name: api-availability
+      objective: 99.9
+      description: API Gateway availability
+      sli:
+        events:
+          error_query: sum(rate(api_requests_total{status=~"5.."}[5m]))
+          total_query: sum(rate(api_requests_total[5m]))
+      alerting:
+        name: APIAvailabilityAlert
+        page_alert:
+          labels:
+            severity: critical
+
+    - name: task-success-rate
+      objective: 99.5
+      description: Task completion success rate
+      sli:
+        events:
+          error_query: sum(rate(task_failures_total[5m]))
+          total_query: sum(rate(task_completions_total[5m]))
+      alerting:
+        name: TaskSuccessRateAlert
+        page_alert:
+          labels:
+            severity: warning
+
+    - name: api-latency
+      objective: 95
+      description: API requests under 1s
+      sli:
+        events:
+          error_query: |
+            sum(rate(api_request_duration_seconds_bucket{le="1"}[5m]))
+          total_query: sum(rate(api_request_duration_seconds_count[5m]))
+      alerting:
+        name: APILatencyAlert
+        page_alert:
+          labels:
+            severity: warning
+
+    - name: model-availability
+      objective: 99
+      description: Model inference availability
+      sli:
+        events:
+          error_query: sum(rate(model_inference_failures_total[5m]))
+          total_query: sum(rate(model_inference_total[5m]))
+      alerting:
+        name: ModelAvailabilityAlert
+        page_alert:
+          labels:
+            severity: warning

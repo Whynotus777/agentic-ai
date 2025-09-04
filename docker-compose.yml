@@ -1,0 +1,55 @@
+﻿version: "3.8"
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: agentic
+      POSTGRES_USER: agentic_user
+      POSTGRES_PASSWORD: agentic_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: docker/orchestrator.Dockerfile
+    environment:
+      DATABASE_URL: postgresql://agentic_user:agentic_pass@postgres:5432/agentic
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      - postgres
+      - redis
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./orchestrator:/app/orchestrator
+      - ./common:/app/common
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    environment:
+      ORCHESTRATOR_URL: http://orchestrator:8080
+    ports:
+      - "8000:8000"
+    depends_on:
+      - orchestrator
+    volumes:
+      - ./api:/app/api
+      - ./common:/app/common
+
+volumes:
+  postgres_data:
+  redis_data:

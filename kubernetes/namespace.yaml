@@ -1,0 +1,868 @@
+﻿# kubernetes/namespace.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agentic-ai
+  labels:
+    name: agentic-ai
+    environment: production
+
+---
+# kubernetes/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentic-ai-config
+  namespace: agentic-ai
+data:
+  app.yaml: |
+    environment: production
+    log_level: info
+    
+    orchestrator:
+      max_concurrent_tasks: 50
+      task_timeout_seconds: 300
+      planning_timeout_seconds: 60
+    
+    models:
+      default_temperature: 0.7
+      max_retries: 3
+      circuit_breaker_threshold: 5
+      circuit_breaker_timeout: 60
+    
+    rate_limits:
+      default_rpm: 100
+      burst_multiplier: 1.5
+    
+    observability:
+      traces_sample_rate: 0.1
+      metrics_interval: 30
+      otlp_endpoint: "http://otel-collector:4317"
+
+---
+# kubernetes/secrets.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: agentic-ai-secrets
+  namespace: agentic-ai
+type: Opaque
+stringData:
+  OPENAI_API_KEY: "your-openai-key"
+  ANTHROPIC_API_KEY: "your-anthropic-key"
+  GOOGLE_API_KEY: "your-google-key"
+  DEEPSEEK_API_KEY: "your-deepseek-key"
+  DATABASE_URL: "postgresql://user:pass@postgres:5432/agentic"
+  REDIS_URL: "redis://:password@redis:6379"
+  AWS_ACCESS_KEY_ID: "your-aws-key"
+  AWS_SECRET_ACCESS_KEY: "your-aws-secret"
+
+---
+# kubernetes/orchestrator-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator
+  namespace: agentic-ai
+  labels:
+    app: orchestrator
+    component: core
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: orchestrator
+  template:
+    metadata:
+      labels:
+        app: orchestrator
+        component: core
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: orchestrator
+      nodeSelector:
+        workload: orchestrator
+      
+      initContainers:
+      - name: wait-for-db
+        image: busybox:1.35
+        command: ['sh', '-c', 'until nc -z postgres 5432; do echo waiting for db; sleep 2; done;']
+      
+      - name: migrate-db
+        image: agentic-ai/orchestrator:latest
+        command: ['python', 'migrate.py']
+        envFrom:
+        - secretRef:
+            name: agentic-ai-secrets
+      
+      containers:
+      - name: orchestrator
+        image: agentic-ai/orchestrator:latest
+        imagePullPolicy: Always
+        
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        - containerPort: 9090
+          name: metrics
+          protocol: TCP
+        
+        env:
+        - name: APP_NAME
+          value: "orchestrator"
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        
+        envFrom:
+        - secretRef:
+            name: agentic-ai-secrets
+        - configMapRef:
+            name: agentic-ai-config
+        
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+        
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        
+        volumeMounts:
+        - name: config
+          mountPath: /app/config
+          readOnly: true
+        - name: cache
+          mountPath: /app/cache
+      
+      volumes:
+      - name: config
+        configMap:
+          name: agentic-ai-config
+      - name: cache
+        emptyDir:
+          sizeLimit: 1Gi
+
+---
+# kubernetes/agent-pool-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-pool-cpu
+  namespace: agentic-ai
+  labels:
+    app: agent-pool
+    type: cpu
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: agent-pool
+      type: cpu
+  template:
+    metadata:
+      labels:
+        app: agent-pool
+        type: cpu
+    spec:
+      serviceAccountName: agent
+      
+      containers:
+      - name: agent
+        image: agentic-ai/agent:latest
+        imagePullPolicy: Always
+        
+        env:
+        - name: AGENT_TYPE
+          value: "cpu"
+        - name: MODEL_CACHE_DIR
+          value: "/models"
+        
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "2000m"
+          limits:
+            memory: "8Gi"
+            cpu: "4000m"
+        
+        volumeMounts:
+        - name: models
+          mountPath: /models
+        - name: workspace
+          mountPath: /workspace
+      
+      volumes:
+      - name: models
+        persistentVolumeClaim:
+          claimName: model-cache-pvc
+      - name: workspace
+        emptyDir:
+          sizeLimit: 10Gi
+
+---
+# kubernetes/agent-pool-gpu-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-pool-gpu
+  namespace: agentic-ai
+  labels:
+    app: agent-pool
+    type: gpu
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: agent-pool
+      type: gpu
+  template:
+    metadata:
+      labels:
+        app: agent-pool
+        type: gpu
+    spec:
+      serviceAccountName: agent
+      nodeSelector:
+        workload: ai-inference
+      
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      
+      containers:
+      - name: agent
+        image: agentic-ai/agent-gpu:latest
+        imagePullPolicy: Always
+        
+        env:
+        - name: AGENT_TYPE
+          value: "gpu"
+        - name: CUDA_VISIBLE_DEVICES
+          value: "0"
+        
+        resources:
+          requests:
+            memory: "8Gi"
+            cpu: "4000m"
+            nvidia.com/gpu: 1
+          limits:
+            memory: "16Gi"
+            cpu: "8000m"
+            nvidia.com/gpu: 1
+        
+        volumeMounts:
+        - name: models
+          mountPath: /models
+        - name: workspace
+          mountPath: /workspace
+        - name: shm
+          mountPath: /dev/shm
+      
+      volumes:
+      - name: models
+        persistentVolumeClaim:
+          claimName: model-cache-pvc
+      - name: workspace
+        emptyDir:
+          sizeLimit: 20Gi
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi
+
+---
+# kubernetes/control-plane-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: control-plane
+  namespace: agentic-ai
+  labels:
+    app: control-plane
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: control-plane
+  template:
+    metadata:
+      labels:
+        app: control-plane
+    spec:
+      serviceAccountName: control-plane
+      nodeSelector:
+        workload: system
+      
+      tolerations:
+      - key: workload
+        value: system
+        effect: NoSchedule
+      
+      containers:
+      - name: policy-engine
+        image: agentic-ai/policy-engine:latest
+        ports:
+        - containerPort: 8081
+          name: http
+        
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+      
+      - name: model-router
+        image: agentic-ai/model-router:latest
+        ports:
+        - containerPort: 8082
+          name: http
+        
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "250m"
+      
+      - name: capability-registry
+        image: agentic-ai/capability-registry:latest
+        ports:
+        - containerPort: 8083
+          name: http
+        
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "250m"
+
+---
+# kubernetes/execution-layer-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-executor
+  namespace: agentic-ai
+  labels:
+    app: task-executor
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: task-executor
+  template:
+    metadata:
+      labels:
+        app: task-executor
+    spec:
+      serviceAccountName: executor
+      
+      containers:
+      - name: executor
+        image: agentic-ai/task-executor:latest
+        
+        env:
+        - name: EXECUTOR_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: MAX_CONCURRENT_TASKS
+          value: "10"
+        - name: TASK_TIMEOUT_SECONDS
+          value: "300"
+        
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+
+---
+# kubernetes/message-bus-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: message-bus
+  namespace: agentic-ai
+  labels:
+    app: message-bus
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: message-bus
+  template:
+    metadata:
+      labels:
+        app: message-bus
+    spec:
+      containers:
+      - name: nats
+        image: nats:2.10-alpine
+        
+        ports:
+        - containerPort: 4222
+          name: client
+        - containerPort: 8222
+          name: monitor
+        - containerPort: 6222
+          name: cluster
+        
+        command:
+        - /nats-server
+        - --cluster_name=agentic-ai
+        - --http_port=8222
+        - --port=4222
+        - --max_payload=8MB
+        - --max_pending=256MB
+        - --jetstream
+        - --store_dir=/data
+        
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8222
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "250m"
+        
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      
+      volumes:
+      - name: data
+        emptyDir:
+          sizeLimit: 1Gi
+
+---
+# kubernetes/api-gateway-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: agentic-ai
+  labels:
+    app: api-gateway
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: api-gateway
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+    spec:
+      serviceAccountName: api-gateway
+      
+      containers:
+      - name: gateway
+        image: agentic-ai/api-gateway:latest
+        
+        ports:
+        - containerPort: 8000
+          name: http
+        - containerPort: 8443
+          name: https
+        
+        env:
+        - name: RATE_LIMIT_ENABLED
+          value: "true"
+        - name: DEFAULT_RATE_LIMIT
+          value: "100"
+        - name: CORS_ENABLED
+          value: "true"
+        - name: AUTH_ENABLED
+          value: "true"
+        
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+
+---
+# kubernetes/services.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: orchestrator
+  namespace: agentic-ai
+spec:
+  selector:
+    app: orchestrator
+  ports:
+  - port: 80
+    targetPort: 8080
+    name: http
+  - port: 9090
+    targetPort: 9090
+    name: metrics
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-gateway
+  namespace: agentic-ai
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: "arn:aws:acm:..."
+spec:
+  selector:
+    app: api-gateway
+  ports:
+  - port: 443
+    targetPort: 8443
+    name: https
+  - port: 80
+    targetPort: 8000
+    name: http
+  type: LoadBalancer
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: control-plane
+  namespace: agentic-ai
+spec:
+  selector:
+    app: control-plane
+  ports:
+  - port: 8081
+    name: policy
+  - port: 8082
+    name: router
+  - port: 8083
+    name: registry
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: message-bus
+  namespace: agentic-ai
+spec:
+  selector:
+    app: message-bus
+  ports:
+  - port: 4222
+    name: client
+  - port: 8222
+    name: monitor
+  type: ClusterIP
+
+---
+# kubernetes/persistent-volumes.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-cache-pvc
+  namespace: agentic-ai
+spec:
+  accessModes:
+  - ReadWriteMany
+  storageClassName: efs-sc
+  resources:
+    requests:
+      storage: 100Gi
+
+---
+# kubernetes/service-accounts.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: orchestrator
+  namespace: agentic-ai
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT:role/agentic-ai-orchestrator
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent
+  namespace: agentic-ai
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT:role/agentic-ai-agent
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: control-plane
+  namespace: agentic-ai
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT:role/agentic-ai-control-plane
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: executor
+  namespace: agentic-ai
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT:role/agentic-ai-executor
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: api-gateway
+  namespace: agentic-ai
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT:role/agentic-ai-api-gateway
+
+---
+# kubernetes/horizontal-pod-autoscaler.yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: orchestrator-hpa
+  namespace: agentic-ai
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: orchestrator
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 10
+        periodSeconds: 60
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: agent-pool-cpu-hpa
+  namespace: agentic-ai
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: agent-pool-cpu
+  minReplicas: 5
+  maxReplicas: 20
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 80
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: task-executor-hpa
+  namespace: agentic-ai
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: task-executor
+  minReplicas: 5
+  maxReplicas: 50
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 75
+  - type: Pods
+    pods:
+      metric:
+        name: pending_tasks
+      target:
+        type: AverageValue
+        averageValue: "10"
+
+---
+# kubernetes/network-policies.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: orchestrator-policy
+  namespace: agentic-ai
+spec:
+  podSelector:
+    matchLabels:
+      app: orchestrator
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: api-gateway
+    ports:
+    - protocol: TCP
+      port: 8080
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: control-plane
+  - to:
+    - podSelector:
+        matchLabels:
+          app: agent-pool
+  - to:
+    - podSelector:
+        matchLabels:
+          app: message-bus
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    ports:
+    - protocol: TCP
+      port: 53  # DNS
+    - protocol: UDP
+      port: 53
+
+---
+# kubernetes/pod-disruption-budget.yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: orchestrator-pdb
+  namespace: agentic-ai
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: orchestrator
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: control-plane-pdb
+  namespace: agentic-ai
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: control-plane
+
+---
+# kubernetes/monitoring.yaml
+apiVersion: v1
+kind: ServiceMonitor
+metadata:
+  name: orchestrator-metrics
+  namespace: agentic-ai
+spec:
+  selector:
+    matchLabels:
+      app: orchestrator
+  endpoints:
+  - port: metrics
+    interval: 30s
+    path: /metrics
