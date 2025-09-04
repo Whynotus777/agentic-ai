@@ -1,0 +1,287 @@
+# config/router.yaml
+# Domain-specific routing policy with guardrails and auto-tuning
+
+version: "1.0"
+metadata:
+  last_updated: "2025-01-01T00:00:00Z"
+  auto_tune_enabled: true
+  telemetry_window: "7d"
+
+# Model capability registry with performance metrics
+models:
+  orchestrators:
+    tier1_frontier:
+      - name: gpt-5
+        capabilities: [complex_planning, synthesis, multi_repo]
+        max_context: 128000
+        cost_per_1k_input: 0.15
+        cost_per_1k_output: 0.45
+        historical_success_rate: 0.97
+        p95_latency_ms: 8500
+        
+      - name: claude-4.1
+        capabilities: [cautious_reasoning, long_context_coding]
+        max_context: 200000
+        cost_per_1k_input: 0.08
+        cost_per_1k_output: 0.24
+        historical_success_rate: 0.96
+        p95_latency_ms: 7200
+        
+      - name: gemini-2.5-pro
+        capabilities: [multimodal, large_context, diagrams]
+        max_context: 1000000
+        cost_per_1k_input: 0.00125
+        cost_per_1k_output: 0.005
+        historical_success_rate: 0.94
+        p95_latency_ms: 9000
+        
+    tier2_balanced:
+      - name: o4-mini
+        capabilities: [reasoning_optimized, standard_tasks]
+        max_context: 128000
+        cost_per_1k_input: 0.00015
+        cost_per_1k_output: 0.0006
+        historical_success_rate: 0.92
+        p95_latency_ms: 3500
+        
+      - name: deepseek-r1
+        capabilities: [high_throughput, cost_effective]
+        max_context: 64000
+        cost_per_1k_input: 0.00014
+        cost_per_1k_output: 0.00028
+        historical_success_rate: 0.89
+        p95_latency_ms: 2800
+        
+  specialized_agents:
+    code:
+      - name: deepseek-coder-6.7b
+        capabilities: [code_generation, multi_file]
+        deployment: cloud
+        cost_per_1k: 0.00003
+        
+      - name: yi-coder-9b
+        capabilities: [code_generation, local_execution]
+        deployment: local
+        cost_per_1k: 0.00
+        benchmark_score: 23.4  # LiveCodeBench
+        
+      - name: starcoder2-7b
+        capabilities: [code_completion, refactoring]
+        deployment: edge
+        cost_per_1k: 0.00002
+        
+    robotics:
+      - name: rt-2
+        capabilities: [vision_language_action, perceive_act]
+        deployment: cloud
+        hardware_requirements: [gpu_a100]
+        
+      - name: pi-0
+        capabilities: [manipulation, state_of_art]
+        deployment: cloud
+        
+      - name: pi-0-small
+        capabilities: [edge_perception, lightweight]
+        deployment: edge
+        params: 470000000
+        
+      - name: gemini-nano
+        capabilities: [on_device_perception, text_processing]
+        deployment: edge
+        params: 1800000000
+        
+    bioengineering:
+      - name: alphafold-3
+        capabilities: [structure_prediction, complex_modeling]
+        deployment: cloud
+        hardware_requirements: [gpu_a100, ram_32gb]
+        
+      - name: esm3
+        capabilities: [protein_design, sequence_semantics]
+        deployment: cloud
+        
+      - name: esm-c-600m
+        capabilities: [sequence_triage, lightweight_filtering]
+        deployment: local
+        params: 600000000
+        
+    simulation:
+      - name: phi-3-medium
+        capabilities: [local_helper, offline_simulation]
+        deployment: local
+        
+      - name: llama-3.1-8b
+        capabilities: [matlab_integration, simulink]
+        deployment: local
+
+# Routing rules with guardrails
+routes:
+  # Robotics domain - high safety requirements
+  - when:
+      domain: robotics
+      capability: [perceive_act, vision_language_action, language_to_action]
+    routing:
+      primary: rt-2
+      fallbacks: [pi-0, gpt-5]
+      timeout_s: 30
+    guardrails:
+      require_hitl: true
+      hitl_approval_timeout_s: 300
+      rate_limit_hz: 10
+      max_retries: 1
+      safety_checks:
+        - collision_detection
+        - force_limits
+        - workspace_boundaries
+      telemetry:
+        sample_rate: 1.0  # 100% for safety-critical
+        
+  # Simulation with large context needs
+  - when:
+      domain: simulation
+      any:
+        - tokens_estimate: {gt: 200000}
+        - needs_multimodal: true
+    routing:
+      primary: gemini-2.5-pro
+      fallbacks: [gpt-5, claude-4.1]
+      timeout_s: 60
+    guardrails:
+      max_cost_usd: 50
+      chunk_strategy: sliding_window
+      cache_ttl_minutes: 1440
+      
+  # Bioengineering - specialized models required
+  - when:
+      domain: bio
+      task: [structure_prediction, protein_design]
+    routing:
+      primary: alphafold-3
+      auxiliaries: [esm3, esm-c-600m]
+      ensemble_strategy: pipeline  # esm filters -> alphafold predicts
+      timeout_s: 300
+    guardrails:
+      require_dataset_card: true
+      pii_filter: strict
+      audit_log: required
+      
+  # High-complexity application development
+  - when:
+      domain: appdev
+      ticket_complexity: high
+      any:
+        - files_count: {gt: 10}
+        - estimated_loc: {gt: 1000}
+    routing:
+      primary: gpt-5
+      fallbacks: [claude-4.1, deepseek-v3]
+      timeout_s: 120
+    guardrails:
+      require_hitl: true
+      sandbox_execution: required
+      static_analysis: required
+      test_coverage_min: 0.8
+      
+  # Budget-conscious development
+  - when:
+      domain: appdev
+      budget: tight
+      all:
+        - priority: {lte: medium}
+        - deadline_days: {gte: 7}
+    routing:
+      primary: deepseek-coder-6.7b
+      fallbacks: [starcoder2-7b, yi-coder-9b]
+      prefer_local: true
+      timeout_s: 45
+    guardrails:
+      max_cost_usd: 1
+      cache_aggressively: true
+      
+  # General web search tasks
+  - when:
+      capability: web_search
+      sensitive_data: false
+    routing:
+      primary: o4-mini
+      fallbacks: [deepseek-r1]
+      timeout_s: 15
+    guardrails:
+      egress_domains_allowlist:
+        - "*.wikipedia.org"
+        - "*.arxiv.org"
+        - "*.github.com"
+        - "*.stackoverflow.com"
+      content_filters:
+        - jailbreak_detector
+        - pii_redactor
+        
+# Default routing when no rules match
+defaults:
+  orchestrator:
+    model: o4-mini
+    timeout_s: 30
+    max_retries: 3
+    
+  small_local:
+    code: yi-coder-9b
+    general: phi-3-medium
+    vla: pi-0-small
+    
+  guardrails:
+    max_cost_per_request_usd: 10
+    require_trace_id: true
+    log_sampling_rate: 0.01  # 1% default
+    log_sampling_on_error: 1.0  # 100% on error
+    
+# Auto-tuning configuration
+auto_tuning:
+  enabled: true
+  metrics_window: 7d
+  rebalance_frequency: daily
+  
+  scoring_weights:
+    success_rate: 0.4
+    latency_p95: 0.2
+    cost_efficiency: 0.3
+    user_satisfaction: 0.1
+    
+  promotion_criteria:
+    min_requests: 100
+    success_rate_improvement: 0.02
+    
+  demotion_criteria:
+    success_rate_threshold: 0.85
+    latency_regression_factor: 1.5
+    
+# Circuit breaker configuration
+circuit_breakers:
+  default:
+    error_threshold_percentage: 50
+    request_volume_threshold: 20
+    sleep_window_ms: 60000
+    timeout_ms: 30000
+    
+  per_model:
+    gpt-5:
+      error_threshold_percentage: 30  # More sensitive for expensive model
+      sleep_window_ms: 120000
+    alphafold-3:
+      timeout_ms: 300000  # 5 minutes for complex proteins
+      
+# Budget controls
+budget_controls:
+  global:
+    daily_limit_usd: 10000
+    hourly_limit_usd: 500
+    alert_threshold_percentage: 80
+    
+  per_tenant:
+    default_daily_usd: 100
+    default_requests_per_minute: 60
+    burst_multiplier: 2
+    
+  cost_anomaly_detection:
+    baseline_window: 7d
+    alert_multiplier: 2.0
+    auto_throttle_multiplier: 3.0
