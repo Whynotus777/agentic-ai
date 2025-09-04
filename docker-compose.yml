@@ -1,10 +1,10 @@
-﻿version: "3.8"
+﻿version: '3.8'
 
 services:
   postgres:
     image: postgres:15
     environment:
-      POSTGRES_DB: agentic
+      POSTGRES_DB: agentic_ai
       POSTGRES_USER: agentic_user
       POSTGRES_PASSWORD: agentic_pass
     ports:
@@ -20,35 +20,25 @@ services:
     volumes:
       - redis_data:/data
 
-  orchestrator:
-    build:
-      context: .
-      dockerfile: docker/orchestrator.Dockerfile
-    environment:
-      DATABASE_URL: postgresql://agentic_user:agentic_pass@postgres:5432/agentic
-      REDIS_URL: redis://redis:6379
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
     depends_on:
-      - postgres
-      - redis
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
     ports:
-      - "8080:8080"
-    volumes:
-      - ./orchestrator:/app/orchestrator
-      - ./common:/app/common
+      - "9092:9092"
 
-  api-gateway:
-    build:
-      context: .
-      dockerfile: docker/api.Dockerfile
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
     environment:
-      ORCHESTRATOR_URL: http://orchestrator:8080
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
     ports:
-      - "8000:8000"
-    depends_on:
-      - orchestrator
-    volumes:
-      - ./api:/app/api
-      - ./common:/app/common
+      - "2181:2181"
 
 volumes:
   postgres_data:
