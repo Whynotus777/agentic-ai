@@ -1,0 +1,283 @@
+﻿openapi: 3.0.3
+info:
+  title: Task Orchestration API
+  version: 1.0.0
+  description: Public API for task execution with HITL approval flow
+servers:
+  - url: /api/v1
+paths:
+  /tasks:
+    post:
+      summary: Create and enqueue a new task
+      operationId: createTask
+      security:
+        - TenantAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskRequest'
+      responses:
+        '201':
+          description: Task created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  
+  /tasks/{taskId}:
+    get:
+      summary: Get task status and last event
+      operationId: getTask
+      security:
+        - TenantAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Task details retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskStatus'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  
+  /approvals/{taskId}:
+    post:
+      summary: Record HITL approval for a task
+      operationId: approveTask
+      security:
+        - TenantAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApprovalRequest'
+      responses:
+        '204':
+          description: Approval recorded successfully
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  
+  /openapi:
+    get:
+      summary: Get OpenAPI specification
+      operationId: getOpenAPISpec
+      responses:
+        '200':
+          description: OpenAPI specification
+          content:
+            application/yaml:
+              schema:
+                type: string
+
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 256
+      description: Unique key to ensure idempotent request processing
+    
+    TenantId:
+      name: X-Tenant-ID
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Tenant identifier for multi-tenant isolation
+  
+  schemas:
+    TaskRequest:
+      type: object
+      required:
+        - operation
+        - payload
+      properties:
+        operation:
+          type: string
+          enum: [analyze, transform, commit, actuate]
+        payload:
+          type: object
+          description: Operation-specific payload
+        metadata:
+          type: object
+          additionalProperties: true
+    
+    TaskResponse:
+      type: object
+      properties:
+        task_id:
+          type: string
+          format: uuid
+        trace_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [queued, processing, hitl_required, completed, failed]
+        created_at:
+          type: string
+          format: date-time
+    
+    TaskStatus:
+      type: object
+      properties:
+        task_id:
+          type: string
+          format: uuid
+        trace_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [queued, processing, hitl_required, completed, failed]
+        last_event:
+          $ref: '#/components/schemas/TaskEvent'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    
+    TaskEvent:
+      type: object
+      properties:
+        event_type:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        data:
+          type: object
+        approval_link:
+          type: string
+          description: Link for HITL approval when status is HITL_REQUIRED
+    
+    ApprovalRequest:
+      type: object
+      required:
+        - approval_token
+        - decision
+      properties:
+        approval_token:
+          type: string
+        decision:
+          type: string
+          enum: [approve, reject]
+        reason:
+          type: string
+    
+    ErrorResponse:
+      type: object
+      required:
+        - error_code
+        - message
+      properties:
+        error_code:
+          type: string
+          enum:
+            - SCHEMA_VALIDATION_FAILED
+            - AUTHENTICATION_FAILED
+            - AUTHORIZATION_FAILED
+            - RESOURCE_NOT_FOUND
+            - RATE_LIMIT_EXCEEDED
+            - HITL_REQUIRED
+            - EXECUTION_TIMEOUT
+            - DEPENDENCY_FAILED
+            - INTERNAL_ERROR
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+        trace_id:
+          type: string
+          format: uuid
+  
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    
+    Unauthorized:
+      description: Authentication failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    
+    TooManyRequests:
+      description: Rate limit exceeded
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: Number of seconds to wait before retrying
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+  
+  securitySchemes:
+    TenantAuth:
+      type: apiKey
+      in: header
+      name: X-Tenant-ID
