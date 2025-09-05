@@ -1,0 +1,245 @@
+# Capability Registry Configuration
+capabilities:
+  # Version Control Capabilities
+  repo.commit:
+    owner: "vcs-team"
+    scopes: ["write", "modify"]
+    rate_limits:
+      per_min: 10
+      per_hour: 100
+    budget_usd_day: 10.0
+    tools: ["git", "diff", "pre-commit"]
+    pii: false
+    description: "Commit code changes to repository"
+    version: "1.0"
+    tags: ["vcs", "critical", "audit"]
+    dependencies: []
+    
+  repo.push:
+    owner: "vcs-team"
+    scopes: ["write", "publish"]
+    rate_limits:
+      per_min: 5
+      per_hour: 50
+    budget_usd_day: 10.0
+    tools: ["git", "gh-cli"]
+    pii: false
+    description: "Push code to remote repository"
+    version: "1.0"
+    tags: ["vcs", "critical"]
+    dependencies: ["repo.commit"]
+    
+  repo.read:
+    owner: "vcs-team"
+    scopes: ["read"]
+    rate_limits:
+      per_min: 100
+      per_hour: 5000
+    budget_usd_day: 5.0
+    tools: ["git", "gh-api"]
+    pii: false
+    description: "Read repository content"
+    version: "1.0"
+    tags: ["vcs"]
+    dependencies: []
+
+  # Robotics Capabilities
+  robot.actuate:
+    owner: "robotics-team"
+    scopes: ["control", "physical", "safety-critical"]
+    rate_limits:
+      per_min: 1
+      per_hour: 60
+    budget_usd_day: 500.0
+    tools: ["ros2", "moveit", "gazebo"]
+    pii: false
+    description: "Control physical robot actuators"
+    version: "2.0"
+    tags: ["safety-critical", "robotics", "hitl-required"]
+    dependencies: ["robot.plan", "robot.sense"]
+    
+  robot.sense:
+    owner: "robotics-team"
+    scopes: ["read", "monitor"]
+    rate_limits:
+      per_min: 100
+      per_hour: 6000
+    budget_usd_day: 100.0
+    tools: ["ros2", "opencv", "pcl"]
+    pii: false
+    description: "Read robot sensor data"
+    version: "2.0"
+    tags: ["robotics", "telemetry"]
+    dependencies: []
+    
+  robot.plan:
+    owner: "robotics-team"
+    scopes: ["compute", "planning"]
+    rate_limits:
+      per_min: 10
+      per_hour: 500
+    budget_usd_day: 200.0
+    tools: ["moveit", "ompl", "ros2"]
+    pii: false
+    description: "Generate robot motion plans"
+    version: "1.5"
+    tags: ["robotics", "compute-intensive"]
+    dependencies: ["robot.sense"]
+
+  # LLM Capabilities
+  llm.generate:
+    owner: "ai-team"
+    scopes: ["inference", "generate", "text"]
+    rate_limits:
+      per_min: 60
+      per_hour: 1000
+    budget_usd_day: 100.0
+    tools: ["openai", "anthropic", "langchain"]
+    pii: true
+    description: "Generate text using large language models"
+    version: "3.0"
+    tags: ["ai", "llm", "pii-risk"]
+    dependencies: []
+    
+  llm.embed:
+    owner: "ai-team"
+    scopes: ["inference", "vectorize"]
+    rate_limits:
+      per_min: 200
+      per_hour: 10000
+    budget_usd_day: 20.0
+    tools: ["openai", "sentence-transformers", "faiss"]
+    pii: true
+    description: "Generate embeddings for text"
+    version: "2.0"
+    tags: ["ai", "embeddings"]
+    dependencies: []
+    
+  llm.finetune:
+    owner: "ai-team"
+    scopes: ["training", "modify"]
+    rate_limits:
+      per_min: 1
+      per_hour: 5
+    budget_usd_day: 1000.0
+    tools: ["openai", "huggingface", "wandb"]
+    pii: true
+    description: "Fine-tune language models"
+    version: "1.0"
+    tags: ["ai", "training", "expensive"]
+    dependencies: ["llm.generate", "data.read"]
+
+  # Data Capabilities
+  data.read:
+    owner: "data-team"
+    scopes: ["read", "query"]
+    rate_limits:
+      per_min: 1000
+      per_hour: 50000
+    budget_usd_day: 20.0
+    tools: ["postgres", "redis", "s3", "bigquery"]
+    pii: true
+    description: "Read data from storage systems"
+    version: "2.5"
+    tags: ["data", "pii-risk"]
+    dependencies: []
+    
+  data.write:
+    owner: "data-team"
+    scopes: ["write", "modify"]
+    rate_limits:
+      per_min: 100
+      per_hour: 5000
+    budget_usd_day: 50.0
+    tools: ["postgres", "redis", "s3", "kafka"]
+    pii: true
+    description: "Write data to storage systems"
+    version: "2.5"
+    tags: ["data", "pii-risk", "audit"]
+    dependencies: []
+    
+  data.delete:
+    owner: "data-team"
+    scopes: ["delete", "purge"]
+    rate_limits:
+      per_min: 10
+      per_hour: 100
+    budget_usd_day: 10.0
+    tools: ["postgres", "redis", "s3"]
+    pii: true
+    description: "Delete data from storage systems"
+    version: "2.0"
+    tags: ["data", "critical", "irreversible", "audit"]
+    dependencies: []
+
+  # Simulation Capabilities
+  sim.run:
+    owner: "simulation-team"
+    scopes: ["execute", "compute", "simulate"]
+    rate_limits:
+      per_min: 10
+      per_hour: 100
+    budget_usd_day: 200.0
+    tools: ["mujoco", "isaac-sim", "gazebo", "unity"]
+    pii: false
+    description: "Execute simulation environments"
+    version: "1.5"
+    tags: ["simulation", "compute-intensive"]
+    dependencies: []
+    
+  sim.modify:
+    owner: "simulation-team"
+    scopes: ["modify", "configure"]
+    rate_limits:
+      per_min: 20
+      per_hour: 200
+    budget_usd_day: 50.0
+    tools: ["mujoco", "isaac-sim", "blender"]
+    pii: false
+    description: "Modify simulation parameters"
+    version: "1.5"
+    tags: ["simulation"]
+    dependencies: ["sim.run"]
+    
+  sim.analyze:
+    owner: "simulation-team"
+    scopes: ["analyze", "metrics"]
+    rate_limits:
+      per_min: 50
+      per_hour: 1000
+    budget_usd_day: 30.0
+    tools: ["numpy", "pandas", "tensorboard"]
+    pii: false
+    description: "Analyze simulation results"
+    version: "1.0"
+    tags: ["simulation", "analytics"]
+    dependencies: ["sim.run", "data.read"]
+
+  # Orchestration Capabilities
+  orchestrate.workflow:
+    owner: "platform-team"
+    scopes: ["orchestrate", "coordinate"]
+    rate_limits:
+      per_min: 20
+      per_hour: 500
+    budget_usd_day: 100.0
+    tools: ["airflow", "temporal", "kubernetes"]
+    pii: false
+    description: "Orchestrate multi-agent workflows"
+    version: "1.0"
+    tags: ["orchestration", "platform"]
+    dependencies: []
+    
+  orchestrate.deploy:
+    owner: "platform-team"
+    scopes: ["deploy", "provision"]
+    rate_limits:
+      per_min: 5
+      per_hour: 50
+    budget_usd_day: 200.0
+    tools: ["kubernetes", "terraform", "helm"]
+    pii: false
+    description: "Deploy agent services"
+    version: "1.0"
+    tags: ["orchestration", "critical", "infrastructure"]
+    dependencies: ["orchestrate.workflow"]

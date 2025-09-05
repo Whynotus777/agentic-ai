@@ -1,0 +1,215 @@
+# Feature Flags Configuration
+flags:
+  # Orchestrator model selection
+  use_deepseek_v3:
+    description: "Use DeepSeek-V3 as default orchestrator model instead of o4-mini"
+    enabled: false  # Toggle this to true to switch from o4-mini to deepseek-v3
+    rollout_percentage: 0.0
+    targets:
+      - type: environment
+        values: ["dev", "staging"]
+        enabled: true
+      - type: tenant
+        values: ["experimental-tenant"]
+        enabled: true
+    metadata:
+      model: "deepseek-v3"
+      previous: "o4-mini"
+      cost_factor: 0.3
+    created_at: "2024-01-01T00:00:00Z"
+    updated_at: "2024-01-01T00:00:00Z"
+    version: "1.0"
+
+  # Robotics domain configuration
+  enable_rt2_robotics:
+    description: "Enable RT-2 model for robotics domain routing"
+    enabled: true
+    rollout_percentage: 100.0
+    targets:
+      - type: service
+        values: ["robotics-service", "robot-planner", "robot-controller"]
+        enabled: true
+      - type: route
+        values: ["/api/v1/robot/*", "/api/v1/actuate/*"]
+        enabled: true
+    metadata:
+      model: "rt-2"
+      domain: "robotics"
+      hitl_required: true
+    created_at: "2024-01-01T00:00:00Z"
+    updated_at: "2024-01-01T00:00:00Z"
+    version: "1.0"
+
+  # HITL configuration
+  hitl_auto_approve:
+    description: "Auto-approve HITL requests for non-critical operations in dev/test"
+    enabled: false
+    rollout_percentage: 10.0
+    targets:
+      - type: tenant
+        values: ["test-tenant", "dev-tenant", "qa-tenant"]
+        enabled: true
+      - type: environment
+        values: ["development", "test"]
+        enabled: true
+    metadata:
+      risk_level: "low"
+      auto_approve_delay_seconds: 5
+    created_at: "2024-01-01T00:00:00Z"
+    updated_at: "2024-01-01T00:00:00Z"
+    version: "1.0"
+
+  # Simulation model routing
+  gemini_25_simulation:
+    description: "Use Gemini 2.5 Pro for simulation domain"
+    enabled: true
+    rollout_percentage: 100.0
+    targets:
+      - type: service
+        values: ["simulation-service", "sim-runner"]
+        enabled: true
+      - type: route
+        values: ["/api/v1/simulate/*"]
+        enabled: true
+    metadata:
+      model: "gemini-2.5-pro"
+      domain: "simulation"
+      max_context: 128000
+    created_at: "2024-01-01T00:00:00Z"
+    updated_at: "2024-01-01T00:00:00Z"
+    version: "1.0"
+
+  # Application development tiers
+  appdev_tier_routing:
+    description: "Enable tiered routing for application development"
+    enabled: true
+    rollout_percentage: 100.0
+    targets:
+      - type: tenant
+        values: ["basic-*", "standard-*", "premium-*"]
+        enabled: true
+      - type: service
+        values: ["appdev-service", "code-assistant"]
+        enabled: true
+    metadata:
+      tiers:
+        basic: "gpt-4"
+        standard: "o4-mini"
+        premium: "o4"
+    created_at: "2024-01-01T00:00:00Z"
+    updated_at: "2024-01-01T00:00:00Z"
+    version: "1.0"
+
+  # Monitoring and observability
+  enhanced_monitoring:
+    description: "Enable enhanced monitoring with distributed tracing"
+    enabled: true
+    rollout_percentage: 50.0
+    targets:
+      - type: service
+        values: ["api-gateway", "orchestrator", "router", "policy-engine"]
+        enabled: true
+      - type: environment
+        values: ["production", "staging"]
+        enabled: true
+    metadata:
+      sampling_rate: 0.1
+      trace_backends: ["jaeger", "datadog"]
+      metrics_interval_seconds: 60
+    created_at: "2024-01-01T00:00:00Z"
+    updated_at: "2024-01-01T00:00:00Z"
+    version: "1.0"
+
+  # Budget and cost controls
+  budget_alerts_v2:
+    description: "Use v2 budget alerting system with predictive warnings"
+    enabled: true
+    rollout_percentage: 75.0
+    targets:
+      - type: tenant
+        values: ["premium-*", "enterprise-*"]
+        enabled: true
+      - type: group
+        values: ["high-spend", "managed-accounts"]
+        enabled: true
+    metadata:
+      alert_channels: ["email", "slack", "pagerduty"]
+      prediction_window_hours: 24
+      alert_thresholds: [50, 80, 90, 100]
+    created_at: "2024-01-01T00:00:00Z"
+    updated_at: "2024-01-01T00:00:00Z"
+    version: "1.0"
+
+  # Capability access control
+  strict_capability_validation:
+    description: "Enforce strict capability validation for all requests"
+    enabled: true
+    rollout_percentage: 100.0
+    targets:
+      - type: environment
+        values: ["production"]
+        enabled: true
+      - type: service
+        values: ["*"]
+        enabled: false  # Override for all services in non-prod
+    metadata:
+      enforcement_mode: "block"
+      log_violations: true
+    created_at: "2024-01-01T00:00:00Z"
+    updated_at: "2024-01-01T00:00:00Z"
+    version: "1.0"
+
+  # Fallback routing
+  enable_fallback_models:
+    description: "Enable automatic fallback to secondary models on primary failure"
+    enabled: true
+    rollout_percentage: 100.0
+    targets:
+      - type: service
+        values: ["orchestrator", "router"]
+        enabled: true
+    metadata:
+      fallback_chains:
+        o4: ["o4-mini", "gpt-4"]
+        deepseek-v3: ["o4-mini", "gpt-4"]
+        gemini-2.5-pro: ["gemini-2-flash", "claude-3"]
+    created_at: "2024-01-01T00:00:00Z"
+    updated_at: "2024-01-01T00:00:00Z"
+    version: "1.0"
+
+  # Rate limiting
+  adaptive_rate_limiting:
+    description: "Enable adaptive rate limiting based on system load"
+    enabled: false
+    rollout_percentage: 25.0
+    targets:
+      - type: environment
+        values: ["production"]
+        enabled: true
+    metadata:
+      algorithm: "token-bucket"
+      adaptation_interval_seconds: 300
+      min_rate_multiplier: 0.5
+      max_rate_multiplier: 1.5
+    created_at: "2024-01-01T00:00:00Z"
+    updated_at: "2024-01-01T00:00:00Z"
+    version: "1.0"
+
+  # A/B testing
+  new_router_algorithm:
+    description: "Test new intelligent router algorithm"
+    enabled: false
+    rollout_percentage: 5.0
+    targets:
+      - type: tenant
+        values: ["beta-*"]
+        enabled: true
+      - type: user
+        values: ["internal-*"]
+        enabled: true
+    metadata:
+      algorithm: "reinforcement-learning"
+      model_version: "2.0-beta"
+    created_at: "2024-01-01T00:00:00Z"
+    updated_at: "2024-01-01T00:00:00Z"
+    version: "1.0"

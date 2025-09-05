@@ -1,0 +1,159 @@
+# Policy Engine Configuration
+version: "1.0"
+mode: "enforce"  # enforce | monitor | dry_run
+
+rules:
+  capability_rules:
+    # Repository operations
+    repo.commit:
+      hitl_required: true
+      reason: "Code commits require human review for safety"
+      budget_limit_usd: 10.0
+      
+    repo.push:
+      hitl_required: true
+      reason: "Repository pushes require human approval"
+      
+    repo.read:
+      allowed: true
+      pii_check: true
+      
+    # Robot operations  
+    robot.actuate:
+      hitl_required: true
+      reason: "Physical robot actuation requires human supervision"
+      safety_level: "critical"
+      
+    robot.sense:
+      allowed: true
+      rate_limit_per_min: 100
+      
+    robot.plan:
+      allowed: true
+      budget_limit_usd: 50.0
+      
+    # LLM operations
+    llm.generate:
+      allowed: true
+      budget_limit_usd: 100.0
+      rate_limit_per_min: 60
+      
+    llm.embed:
+      allowed: true
+      budget_limit_usd: 20.0
+      
+    # Data operations
+    data.read:
+      allowed: true
+      pii_check: true
+      
+    data.write:
+      approval_required: true
+      reason: "Data writes need approval"
+      
+    data.delete:
+      hitl_required: true
+      reason: "Data deletion is irreversible"
+      
+    # Simulation operations
+    sim.run:
+      allowed: true
+      budget_limit_usd: 200.0
+      
+    sim.modify:
+      approval_required: true
+      
+  domain_rules:
+    robotics:
+      default_hitl: true
+      budget_limit_usd: 500.0
+      safety_critical: true
+      allowed_capabilities:
+        - robot.sense
+        - robot.plan
+        - robot.actuate
+        - llm.generate
+        
+    simulation:
+      default_hitl: false
+      budget_limit_usd: 1000.0
+      allowed_capabilities:
+        - sim.run
+        - sim.modify
+        - llm.generate
+        - data.read
+        
+    appdev:
+      default_hitl: false
+      budget_limit_usd: 50.0
+      allowed_capabilities:
+        - llm.generate
+        - repo.read
+        - data.read
+        
+    research:
+      default_hitl: false
+      budget_limit_usd: 200.0
+      allowed_capabilities:
+        - llm.generate
+        - llm.embed
+        - data.read
+        - sim.run
+        
+  budget_thresholds:
+    daily_limit_usd: 1000.0
+    per_request_limit_usd: 50.0
+    alert_threshold_pct: 80
+    hard_stop_threshold_pct: 95
+    
+  rate_limits:
+    global_per_min: 1000
+    per_tenant_per_min: 100
+    per_capability_defaults:
+      llm.generate: 60
+      robot.actuate: 10
+      data.write: 30
+      
+  egress_scopes:
+    allowed_domains:
+      - "*.internal.com"
+      - "api.openai.com"
+      - "api.anthropic.com"
+      - "*.googleapis.com"
+      
+    blocked_domains:
+      - "*.suspicious.com"
+      - "*.malware.net"
+      
+    allowed_protocols:
+      - https
+      - grpc
+      
+  pii_handling:
+    scan_enabled: true
+    redact_in_logs: true
+    allowed_fields:
+      - user_id
+      - session_id
+    blocked_fields:
+      - ssn
+      - credit_card
+      - password
+      
+  audit:
+    log_all_decisions: true
+    log_denies: true
+    log_hitl_requests: true
+    retention_days: 90
+    
+  overrides:
+    # Emergency overrides for specific tenants/services
+    tenants:
+      test-tenant:
+        mode: "dry_run"
+        budget_multiplier: 0.1
+        
+    services:
+      debug-service:
+        mode: "monitor"
+        skip_hitl: true
