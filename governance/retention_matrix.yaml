@@ -1,0 +1,204 @@
+# governance/retention_matrix.yaml
+version: "1.0"
+last_updated: "2024-01-01"
+next_review: "2024-04-01"
+
+# Retention policies by data classification
+retention_policies:
+  PII:
+    description: "Personally Identifiable Information"
+    retention_days: 30
+    deletion_type: "hard_delete"  # Permanent removal
+    exceptions:
+      - type: "legal_hold"
+        max_extension_days: 2555  # 7 years for legal
+      - type: "active_investigation"
+        max_extension_days: 180
+      - type: "user_consent"
+        max_extension_days: 365
+    stages:
+      - day_range: [0, 7]
+        storage_class: "hot"
+        accessibility: "immediate"
+        encryption: "aes-256-gcm"
+      - day_range: [8, 30]
+        storage_class: "warm"
+        accessibility: "5min_retrieval"
+        encryption: "aes-256-gcm"
+        anonymization: "progressive"
+    post_deletion:
+      action: "shred"
+      verification: "cryptographic_proof"
+      audit_retention_days: 2555  # Keep audit logs for 7 years
+  
+  SENSITIVE:
+    description: "Business-critical or security-sensitive data"
+    retention_days: 90
+    deletion_type: "soft_delete"  # Tombstone with recovery option
+    tombstone_retention_days: 30  # Additional 30 days for recovery
+    exceptions:
+      - type: "security_investigation"
+        max_extension_days: 365
+      - type: "compliance_audit"
+        max_extension_days: 180
+    stages:
+      - day_range: [0, 30]
+        storage_class: "hot"
+        accessibility: "immediate"
+        encryption: "aes-256-gcm"
+      - day_range: [31, 60]
+        storage_class: "warm"
+        accessibility: "15min_retrieval"
+        encryption: "aes-256-cbc"
+        compression: "zstd"
+      - day_range: [61, 90]
+        storage_class: "cold"
+        accessibility: "1hour_retrieval"
+        encryption: "aes-256-cbc"
+        compression: "zstd_max"
+    post_deletion:
+      action: "tombstone"
+      recovery_window_days: 30
+      final_deletion: "shred"
+  
+  EXPORT_OK:
+    description: "Non-sensitive data approved for external sharing"
+    retention_days: 365
+    deletion_type: "tombstone"  # Soft delete with metadata retention
+    tombstone_retention_days: 90
+    exceptions:
+      - type: "regulatory_requirement"
+        max_extension_days: 2555
+      - type: "historical_analysis"
+        max_extension_days: 1095  # 3 years
+    stages:
+      - day_range: [0, 90]
+        storage_class: "hot"
+        accessibility: "immediate"
+        encryption: "optional"
+        aggregation: "none"
+      - day_range: [91, 180]
+        storage_class: "warm"
+        accessibility: "30min_retrieval"
+        encryption: "optional"
+        aggregation: "hourly"
+        sampling_rate: 0.1  # Keep 10% of raw data
+      - day_range: [181, 365]
+        storage_class: "cold"
+        accessibility: "4hour_retrieval"
+        encryption: "optional"
+        aggregation: "daily"
+        sampling_rate: 0.01  # Keep 1% of raw data
+    post_deletion:
+      action: "tombstone"
+      metadata_retention_days: 90
+      final_deletion: "standard_delete"
+
+# Special categories with custom policies
+special_categories:
+  authentication_tokens:
+    base_classification: "SENSITIVE"
+    override_retention_days: 7
+    deletion_type: "secure_wipe"
+    rotation_required: true
+    rotation_interval_days: 90
+  
+  financial_transactions:
+    base_classification: "SENSITIVE"
+    override_retention_days: 2555  # 7 years for tax/audit
+    deletion_type: "archive_then_delete"
+    archive_location: "s3://long-term-archive"
+    immutable_backup: true
+  
+  ml_training_data:
+    base_classification: "SENSITIVE"
+    override_retention_days: 180
+    deletion_type: "differential_privacy"
+    anonymization_epsilon: 1.0
+    allow_aggregates_forever: true
+  
+  robot_telemetry:
+    base_classification: "EXPORT_OK"
+    override_retention_days: 90
+    deletion_type: "progressive_aggregation"
+    safety_critical_retention_days: 730  # 2 years for safety data
+  
+  audit_logs:
+    base_classification: "SENSITIVE"
+    override_retention_days: 2555  # 7 years
+    deletion_type: "archive_only"
+    immutable: true
+    tamper_evidence: true
+
+# Automated enforcement configuration
+enforcement:
+  scan_interval_hours: 24
+  deletion_batch_size: 10000
+  deletion_parallelism: 4
+  
+  scanners:
+    - name: "pii_scanner"
+      schedule: "0 2 * * *"  # 2 AM daily
+      targets: ["PII"]
+      action: "delete_expired"
+    
+    - name: "sensitive_scanner"
+      schedule: "0 3 * * *"  # 3 AM daily
+      targets: ["SENSITIVE"]
+      action: "archive_and_delete"
+    
+    - name: "export_scanner"
+      schedule: "0 4 * * 0"  # 4 AM Sunday
+      targets: ["EXPORT_OK"]
+      action: "tombstone_expired"
+  
+  safeguards:
+    require_approval_for_bulk_delete: true
+    bulk_threshold: 100000
+    prevent_deletion_under_hold: true
+    audit_all_deletions: true
+    backup_before_delete: true
+    backup_retention_days: 30
+
+# Compliance mappings
+compliance_mappings:
+  GDPR:
+    PII_max_retention: 30
+    consent_required: true
+    right_to_erasure: true
+    data_portability: true
+  
+  CCPA:
+    PII_max_retention: 365
+    opt_out_required: true
+    disclosure_required: true
+  
+  HIPAA:
+    medical_data_retention: 2190  # 6 years
+    encryption_required: true
+    audit_trail_required: true
+  
+  SOX:
+    financial_data_retention: 2555  # 7 years
+    immutable_audit_trail: true
+    segregation_of_duties: true
+
+# Recovery procedures
+recovery:
+  tombstone_recovery:
+    max_recovery_window_days: 30
+    require_approval: true
+    approval_roles: ["admin", "data_protection_officer"]
+    audit_recovery: true
+  
+  backup_recovery:
+    backup_locations:
+      - "s3://backup-primary"
+      - "gs://backup-secondary"
+    recovery_sla_hours: 4
+    test_recovery_monthly: true
+  
+  accidental_deletion:
+    prevention_enabled: true
+    confirmation_required: true
+    grace_period_hours: 24

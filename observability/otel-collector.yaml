@@ -1,0 +1,143 @@
+# observability/otel-collector.yaml
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: 'otel-collector'
+          scrape_interval: 10s
+          static_configs:
+            - targets: ['localhost:8888']
+
+processors:
+  batch:
+    timeout: 10s
+    send_batch_size: 1024
+  
+  # Cost injection processor
+  attributes/cost:
+    actions:
+      - key: cost_usd
+        value: 0.0001  # Placeholder: $0.0001 per span base cost
+        action: insert
+      - key: cost_usd
+        from_attribute: span.duration_ms
+        action: update
+        # Formula: base_cost + (duration_ms * 0.000001)
+        # This is a simplified placeholder - replace with actual cost model
+  
+  # Data classification processor
+  attributes/classification:
+    actions:
+      - key: data_tag
+        value: EXPORT_OK
+        action: insert
+      - key: data_tag
+        value: PII
+        action: update
+        from_attribute: user.id
+      - key: data_tag
+        value: SENSITIVE
+        action: update
+        from_attribute: auth.token
+  
+  # Sampling processor
+  probabilistic_sampler:
+    sampling_percentage: 10
+    hash_seed: 22
+  
+  # Resource detection
+  resource:
+    attributes:
+      - key: service.namespace
+        value: production
+        action: insert
+      - key: deployment.environment
+        from_attribute: DEPLOYMENT_ENV
+        action: insert
+
+exporters:
+  # Primary observability backend
+  otlp/primary:
+    endpoint: "observability-backend:4317"
+    tls:
+      insecure: false
+    sending_queue:
+      enabled: true
+      num_consumers: 10
+      queue_size: 5000
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+  
+  # SIEM sink for critical events
+  otlp/siem:
+    endpoint: "siem-endpoint.internal:4318"  # Stub endpoint
+    headers:
+      X-SIEM-Token: "${env:SIEM_TOKEN}"
+    sending_queue:
+      enabled: true
+      queue_size: 1000
+  
+  # Prometheus for metrics
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+    namespace: otel
+    const_labels:
+      environment: production
+  
+  # Debug/logging exporter
+  logging:
+    loglevel: debug
+    sampling_initial: 5
+    sampling_thereafter: 200
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  pprof:
+    endpoint: 0.0.0.0:1777
+  zpages:
+    endpoint: 0.0.0.0:55679
+
+service:
+  extensions: [health_check, pprof, zpages]
+  
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch, attributes/cost, attributes/classification, probabilistic_sampler, resource]
+      exporters: [otlp/primary, logging]
+    
+    metrics:
+      receivers: [otlp, prometheus]
+      processors: [batch, attributes/cost, resource]
+      exporters: [prometheus, otlp/primary]
+    
+    logs:
+      receivers: [otlp]
+      processors: [batch, attributes/classification, resource]
+      exporters: [otlp/primary, logging]
+    
+    # Critical events pipeline to SIEM
+    logs/critical:
+      receivers: [otlp]
+      processors: [batch, attributes/classification]
+      exporters: [otlp/siem]
+
+# Telemetry configuration
+telemetry:
+  logs:
+    level: info
+    development: false
+    encoding: json
+  metrics:
+    level: detailed
+    address: 0.0.0.0:8888

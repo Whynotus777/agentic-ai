@@ -1,0 +1,193 @@
+# monitoring/alerts.yaml
+groups:
+  - name: error_budget_alerts
+    interval: 30s
+    rules:
+      # Tool error rate alert
+      - alert: HighToolErrorRate
+        expr: |
+          (
+            sum(rate(tool_invocation_errors_total[5m])) /
+            sum(rate(tool_invocation_total[5m]))
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          team: platform
+          slo: tool_reliability
+        annotations:
+          summary: "Tool error rate exceeds 5% threshold"
+          description: "Tool error rate is {{ $value | humanizePercentage }} (threshold: 5%)"
+          runbook_url: "https://docs.internal/runbooks/tool-errors"
+          dashboard_url: "https://grafana.internal/d/tool-errors"
+      
+      # Stage-specific SLO alerts
+      - alert: PlanStageSLOBreach
+        expr: |
+          (
+            sum(rate(stage_errors_total{stage="plan"}[10m])) /
+            sum(rate(stage_requests_total{stage="plan"}[10m]))
+          ) > 0.02
+        for: 10m
+        labels:
+          severity: warning
+          stage: plan
+          slo: planning_reliability
+        annotations:
+          summary: "Planning stage SLO breach (>2% error rate)"
+          description: "Planning stage error rate: {{ $value | humanizePercentage }}"
+      
+      - alert: ToolStageSLOBreach
+        expr: |
+          (
+            sum(rate(stage_errors_total{stage="tool"}[10m])) /
+            sum(rate(stage_requests_total{stage="tool"}[10m]))
+          ) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          stage: tool
+          slo: tool_execution
+        annotations:
+          summary: "Tool execution stage SLO breach (>5% error rate)"
+          description: "Tool stage error rate: {{ $value | humanizePercentage }}"
+      
+      - alert: SynthStageSLOBreach
+        expr: |
+          (
+            sum(rate(stage_errors_total{stage="synth"}[10m])) /
+            sum(rate(stage_requests_total{stage="synth"}[10m]))
+          ) > 0.01
+        for: 10m
+        labels:
+          severity: warning
+          stage: synth
+          slo: synthesis_reliability
+        annotations:
+          summary: "Synthesis stage SLO breach (>1% error rate)"
+          description: "Synthesis stage error rate: {{ $value | humanizePercentage }}"
+  
+  - name: cost_anomaly_alerts
+    interval: 60s
+    rules:
+      # Daily cost anomaly detection
+      - alert: DailyCostAnomaly
+        expr: |
+          (
+            sum(increase(span_cost_usd_total[1d])) >
+            2 * avg_over_time(sum(increase(span_cost_usd_total[1d]))[7d:1d])
+          )
+        for: 30m
+        labels:
+          severity: warning
+          team: finops
+          category: cost_control
+        annotations:
+          summary: "Daily cost exceeds 2x the 7-day average"
+          description: "Current daily cost: ${{ $value | humanize }}, 7d avg: ${{ $labels.avg_cost }}"
+          runbook_url: "https://docs.internal/runbooks/cost-anomaly"
+          cost_dashboard: "https://grafana.internal/d/finops-overview"
+      
+      # Hourly cost spike detection
+      - alert: HourlyCostSpike
+        expr: |
+          (
+            sum(rate(span_cost_usd_total[1h])) >
+            3 * avg_over_time(sum(rate(span_cost_usd_total[1h]))[24h:1h])
+          )
+        for: 15m
+        labels:
+          severity: warning
+          team: finops
+          category: cost_control
+        annotations:
+          summary: "Hourly cost spike detected (3x normal)"
+          description: "Current hourly rate: ${{ $value | humanize }}/hr"
+      
+      # Service-specific cost alerts
+      - alert: ServiceCostThreshold
+        expr: |
+          sum by (service_name) (increase(span_cost_usd_total[1h])) > 100
+        for: 10m
+        labels:
+          severity: info
+          team: finops
+        annotations:
+          summary: "Service {{ $labels.service_name }} exceeds $100/hr"
+          description: "Service cost: ${{ $value | humanize }}/hr"
+  
+  - name: data_governance_alerts
+    interval: 30s
+    rules:
+      # PII data access monitoring
+      - alert: UnauthorizedPIIAccess
+        expr: |
+          sum(increase(data_access_total{data_tag="PII", authorized="false"}[5m])) > 0
+        for: 1m
+        labels:
+          severity: critical
+          team: security
+          compliance: gdpr
+        annotations:
+          summary: "Unauthorized PII data access detected"
+          description: "{{ $value }} unauthorized PII access attempts in last 5 minutes"
+          incident_response: "https://docs.internal/incident/pii-breach"
+      
+      # Data retention policy violations
+      - alert: DataRetentionViolation
+        expr: |
+          data_age_days{data_tag="PII"} > 30 or
+          data_age_days{data_tag="SENSITIVE"} > 90 or
+          data_age_days{data_tag="EXPORT_OK"} > 365
+        for: 1h
+        labels:
+          severity: warning
+          team: data_governance
+          compliance: retention_policy
+        annotations:
+          summary: "Data retention policy violation for {{ $labels.data_tag }}"
+          description: "Data age: {{ $value }} days (limit: {{ $labels.retention_days }})"
+      
+      # SIEM event forwarding health
+      - alert: SIEMForwardingFailure
+        expr: |
+          up{job="siem_exporter"} == 0 or
+          rate(siem_events_failed_total[5m]) > 0.01
+        for: 5m
+        labels:
+          severity: warning
+          team: security
+        annotations:
+          summary: "SIEM event forwarding is failing"
+          description: "SIEM sink connectivity or forwarding errors detected"
+  
+  - name: hitl_safety_alerts
+    interval: 10s
+    rules:
+      # HITL bypass attempts
+      - alert: HITLBypassAttempt
+        expr: |
+          sum(increase(hitl_bypass_attempts_total[1m])) > 0
+        for: 1m
+        labels:
+          severity: critical
+          team: safety
+          category: human_in_the_loop
+        annotations:
+          summary: "HITL safety bypass attempt detected"
+          description: "{{ $value }} bypass attempts for {{ $labels.action_type }}"
+          security_response: "https://docs.internal/security/hitl-bypass"
+      
+      # Robot actuation without approval
+      - alert: UnauthorizedRobotActuation
+        expr: |
+          robot_actuation_total{approved="false"} > 0
+        for: 1m
+        labels:
+          severity: critical
+          team: robotics
+          safety: physical_safety
+        annotations:
+          summary: "Unauthorized robot actuation detected"
+          description: "Robot {{ $labels.robot_id }} attempted unauthorized actuation"
+          emergency_stop: "https://control.internal/emergency-stop"
