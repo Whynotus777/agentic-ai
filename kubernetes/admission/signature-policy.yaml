@@ -1,0 +1,299 @@
+# Sigstore Policy Controller for signature verification
+# This enforces that all images must be signed before deployment
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cosign-system
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+
+---
+# ConfigMap with trusted public keys and Sigstore configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: signature-verification-config
+  namespace: cosign-system
+data:
+  # Placeholder for repository public key (if using key-based signing)
+  # Generate with: cosign generate-key-pair
+  cosign.pub: |
+    -----BEGIN PUBLIC KEY-----
+    # PLACEHOLDER: Replace with your actual public key
+    # This is used for key-based signing verification
+    # For keyless (OIDC) signing, use the authorities section below
+    MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE...
+    -----END PUBLIC KEY-----
+    
+  # Sigstore/Rekor transparency log configuration
+  rekor-url: "https://rekor.sigstore.dev"
+  
+  # Fulcio CA for keyless signing
+  fulcio-url: "https://fulcio.sigstore.dev"
+
+---
+# ClusterImagePolicy for signature verification
+apiVersion: policy.sigstore.dev/v1beta1
+kind: ClusterImagePolicy
+metadata:
+  name: require-signature-verification
+spec:
+  # Apply to all images except system namespaces
+  images:
+    - glob: "**"
+  
+  # Exclude system namespaces
+  matchPolicy: "exact"
+  
+  authorities:
+    # Keyless signing verification (GitHub Actions OIDC)
+    - name: github-actions-keyless
+      keyless:
+        # Fulcio certificate requirements
+        identities:
+          # Match GitHub Actions workflow identity
+          - issuer: "https://token.actions.githubusercontent.com"
+            # Update with your repository pattern
+            subjectRegExp: "https://github.com/YOUR_ORG/agentic-ai/.*"
+        
+        # Rekor transparency log verification
+        ctlog:
+          url: "https://rekor.sigstore.dev"
+          
+    # Alternative: Key-based verification (if using cosign generate-key-pair)
+    - name: static-key
+      key:
+        # Reference to public key in ConfigMap
+        data: |
+          -----BEGIN PUBLIC KEY-----
+          # PLACEHOLDER: Your public key here
+          MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE...
+          -----END PUBLIC KEY-----
+
+---
+# Policy for specific namespaces with different requirements
+apiVersion: policy.sigstore.dev/v1beta1
+kind: ClusterImagePolicy
+metadata:
+  name: production-strict-policy
+spec:
+  # Only apply to production images
+  images:
+    - glob: "ghcr.io/*/agentic-ai:*"
+    - glob: "*.amazonaws.com/*:*"
+    - glob: "gcr.io/*:*"
+    
+  authorities:
+    - name: production-authority
+      keyless:
+        identities:
+          - issuer: "https://token.actions.githubusercontent.com"
+            subjectRegExp: "https://github.com/.*/agentic-ai/.*"
+        
+        # Additional attestation requirements
+        attestations:
+          - name: sbom-attestation
+            predicateType: "https://spdx.dev/Document"
+          - name: vulnerability-scan
+            predicateType: "https://trivy.aquasec.com/scan"
+
+---
+# ImagePolicy for namespace-specific verification
+apiVersion: policy.sigstore.dev/v1alpha1
+kind: ImagePolicy
+metadata:
+  name: namespace-image-policy
+  namespace: default
+spec:
+  # Images from this namespace must be signed
+  images:
+    - glob: "**"
+    
+  # Verification settings
+  verification:
+    # Require signature
+    signature: required
+    
+    # Require SBOM attestation
+    attestations:
+      - predicateType: "https://spdx.dev/Document"
+        required: true
+        
+    # Trust configuration
+    trust:
+      # Use Sigstore's public good instance
+      sigstore: public-good
+      
+      # Or specify custom roots
+      # roots:
+      #   - inline: |
+      #       -----BEGIN CERTIFICATE-----
+      #       ...
+      #       -----END CERTIFICATE-----
+
+---
+# ValidatingWebhookConfiguration for admission control
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: signature-validation-webhook
+webhooks:
+  - name: validate.signatures.sigstore.dev
+    admissionReviewVersions: ["v1", "v1beta1"]
+    clientConfig:
+      # Service reference for the webhook
+      service:
+        name: policy-controller-webhook
+        namespace: cosign-system
+        path: /validations/images
+        port: 443
+        
+    # Fail closed - reject if webhook is unavailable
+    failurePolicy: Fail
+    
+    # Match Pod creation/updates
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["deployments", "daemonsets", "statefulsets"]
+        
+    # Skip certain namespaces
+    namespaceSelector:
+      matchExpressions:
+        - key: name
+          operator: NotIn
+          values:
+            - kube-system
+            - kube-public
+            - kube-node-lease
+            - cosign-system
+            
+    # Only validate containers with images
+    objectSelector:
+      matchExpressions:
+        - key: "skip-signature-verification"
+          operator: NotIn
+          values: ["true"]
+          
+    sideEffects: None
+    timeoutSeconds: 30
+
+---
+# NetworkPolicy for webhook security
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: policy-controller-webhook-netpol
+  namespace: cosign-system
+spec:
+  podSelector:
+    matchLabels:
+      app: policy-controller-webhook
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 443
+  egress:
+    # Allow DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+    # Allow HTTPS to Sigstore services
+    - to:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 443
+
+---
+# RBAC for policy controller
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: policy-controller-role
+rules:
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["policy.sigstore.dev"]
+    resources: ["clusterimagepolicies", "imagepolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingwebhookconfigurations"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: policy-controller-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: policy-controller-role
+subjects:
+  - kind: ServiceAccount
+    name: policy-controller
+    namespace: cosign-system
+
+---
+# ServiceAccount for policy controller
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: policy-controller
+  namespace: cosign-system
+automountServiceAccountToken: true
+
+---
+# Service for webhook
+apiVersion: v1
+kind: Service
+metadata:
+  name: policy-controller-webhook
+  namespace: cosign-system
+spec:
+  ports:
+    - name: https
+      port: 443
+      targetPort: 8443
+      protocol: TCP
+  selector:
+    app: policy-controller-webhook
+  type: ClusterIP
+
+---
+# Example: How to bypass verification for specific pods (emergency use only)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: unsigned-pod-example
+  labels:
+    skip-signature-verification: "true"  # This label bypasses verification
+  annotations:
+    policy.sigstore.dev/verify: "false"  # Alternative annotation method
+spec:
+  containers:
+    - name: unsigned-container
+      image: busybox:latest
+      command: ["echo", "This pod bypasses signature verification"]

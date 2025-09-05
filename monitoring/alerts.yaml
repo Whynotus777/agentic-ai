@@ -1,193 +1,312 @@
-# monitoring/alerts.yaml
+﻿# monitoring/alerts.yaml
+# EXTENDED: Added alert owners, labels, and paging policies
+
+# Paging Policy Reference:
+# P0: Immediate page (24/7) - Production down
+# P1: Page during business hours, notify off-hours - Service degradation
+# P2: Notify during business hours - Performance issues
+# P3: Daily digest - Capacity planning
+
 groups:
   - name: error_budget_alerts
     interval: 30s
     rules:
-      # Tool error rate alert
+      # (a) Tool error rate alert
       - alert: HighToolErrorRate
         expr: |
           (
-            sum(rate(tool_invocation_errors_total[5m])) /
-            sum(rate(tool_invocation_total[5m]))
+            sum by (service, capability, tenant) (
+              rate(tool_invocation_errors_total[10m])
+            ) /
+            sum by (service, capability, tenant) (
+              rate(tool_invocation_total[10m])
+            )
           ) > 0.05
-        for: 5m
+        for: 10m
         labels:
           severity: critical
+          owner: "platform-team@company.com"
+          paging_policy: "P1"
+          service: "{{ $labels.service }}"
+          capability: "{{ $labels.capability }}"
+          tenant: "{{ $labels.tenant }}"
           team: platform
-          slo: tool_reliability
+          slo_type: tool_reliability
         annotations:
-          summary: "Tool error rate exceeds 5% threshold"
-          description: "Tool error rate is {{ $value | humanizePercentage }} (threshold: 5%)"
-          runbook_url: "https://docs.internal/runbooks/tool-errors"
-          dashboard_url: "https://grafana.internal/d/tool-errors"
-      
-      # Stage-specific SLO alerts
+          summary: "Tool error rate >5% for {{ $labels.service }}/{{ $labels.capability }}"
+          description: |
+            Service: {{ $labels.service }}
+            Capability: {{ $labels.capability }}
+            Tenant: {{ $labels.tenant }}
+            Current error rate: {{ $value | humanizePercentage }}
+            Threshold: 5%
+            Duration: 10 minutes
+          runbook_url: "https://wiki.internal/runbooks/tool-errors"
+          dashboard_url: "https://grafana.internal/d/tool-errors?var-service={{ $labels.service }}"
+          owner_slack: "#platform-oncall"
+
+      # (c) Stage SLO breaches
       - alert: PlanStageSLOBreach
         expr: |
           (
-            sum(rate(stage_errors_total{stage="plan"}[10m])) /
-            sum(rate(stage_requests_total{stage="plan"}[10m]))
+            sum by (service, capability, tenant) (
+              rate(stage_errors_total{stage="plan"}[10m])
+            ) /
+            sum by (service, capability, tenant) (
+              rate(stage_requests_total{stage="plan"}[10m])
+            )
           ) > 0.02
         for: 10m
         labels:
           severity: warning
+          owner: "orchestration-team@company.com"
+          paging_policy: "P2"
+          service: "{{ $labels.service }}"
+          capability: "{{ $labels.capability }}"
+          tenant: "{{ $labels.tenant }}"
           stage: plan
-          slo: planning_reliability
+          slo_type: planning_reliability
         annotations:
-          summary: "Planning stage SLO breach (>2% error rate)"
-          description: "Planning stage error rate: {{ $value | humanizePercentage }}"
-      
+          summary: "Planning stage SLO breach for {{ $labels.service }}"
+          description: |
+            Stage: Planning
+            Service: {{ $labels.service }}
+            Error rate: {{ $value | humanizePercentage }} (threshold: 2%)
+          owner_slack: "#orchestration-team"
+
       - alert: ToolStageSLOBreach
         expr: |
           (
-            sum(rate(stage_errors_total{stage="tool"}[10m])) /
-            sum(rate(stage_requests_total{stage="tool"}[10m]))
+            sum by (service, capability, tenant) (
+              rate(stage_errors_total{stage="tool"}[10m])
+            ) /
+            sum by (service, capability, tenant) (
+              rate(stage_requests_total{stage="tool"}[10m])
+            )
           ) > 0.05
         for: 10m
         labels:
           severity: warning
+          owner: "platform-team@company.com"
+          paging_policy: "P2"
+          service: "{{ $labels.service }}"
+          capability: "{{ $labels.capability }}"
+          tenant: "{{ $labels.tenant }}"
           stage: tool
-          slo: tool_execution
+          slo_type: tool_execution
         annotations:
-          summary: "Tool execution stage SLO breach (>5% error rate)"
-          description: "Tool stage error rate: {{ $value | humanizePercentage }}"
-      
+          summary: "Tool stage SLO breach for {{ $labels.service }}"
+          description: |
+            Stage: Tool Execution
+            Service: {{ $labels.service }}
+            Error rate: {{ $value | humanizePercentage }} (threshold: 5%)
+          owner_slack: "#platform-oncall"
+
       - alert: SynthStageSLOBreach
         expr: |
           (
-            sum(rate(stage_errors_total{stage="synth"}[10m])) /
-            sum(rate(stage_requests_total{stage="synth"}[10m]))
+            sum by (service, capability, tenant) (
+              rate(stage_errors_total{stage="synth"}[10m])
+            ) /
+            sum by (service, capability, tenant) (
+              rate(stage_requests_total{stage="synth"}[10m])
+            )
           ) > 0.01
         for: 10m
         labels:
           severity: warning
+          owner: "ml-team@company.com"
+          paging_policy: "P2"
+          service: "{{ $labels.service }}"
+          capability: "{{ $labels.capability }}"
+          tenant: "{{ $labels.tenant }}"
           stage: synth
-          slo: synthesis_reliability
+          slo_type: synthesis_reliability
         annotations:
-          summary: "Synthesis stage SLO breach (>1% error rate)"
-          description: "Synthesis stage error rate: {{ $value | humanizePercentage }}"
-  
+          summary: "Synthesis stage SLO breach for {{ $labels.service }}"
+          description: |
+            Stage: Synthesis
+            Service: {{ $labels.service }}
+            Error rate: {{ $value | humanizePercentage }} (threshold: 1%)
+          owner_slack: "#ml-platform"
+
   - name: cost_anomaly_alerts
     interval: 60s
     rules:
-      # Daily cost anomaly detection
+      # (b) Daily cost anomaly detection
       - alert: DailyCostAnomaly
         expr: |
           (
-            sum(increase(span_cost_usd_total[1d])) >
-            2 * avg_over_time(sum(increase(span_cost_usd_total[1d]))[7d:1d])
+            sum by (service, capability, tenant) (
+              increase(span_cost_usd_total[1d])
+            ) >
+            2 * avg_over_time(
+              sum by (service, capability, tenant) (
+                increase(span_cost_usd_total[1d])
+              )[7d:1d]
+            )
           )
         for: 30m
         labels:
           severity: warning
+          owner: "finops-team@company.com"
+          paging_policy: "P3"
+          service: "{{ $labels.service }}"
+          capability: "{{ $labels.capability }}"
+          tenant: "{{ $labels.tenant }}"
           team: finops
           category: cost_control
         annotations:
-          summary: "Daily cost exceeds 2x the 7-day average"
-          description: "Current daily cost: ${{ $value | humanize }}, 7d avg: ${{ $labels.avg_cost }}"
-          runbook_url: "https://docs.internal/runbooks/cost-anomaly"
-          cost_dashboard: "https://grafana.internal/d/finops-overview"
-      
-      # Hourly cost spike detection
+          summary: "Daily cost >2x 7-day avg for {{ $labels.service }}/{{ $labels.tenant }}"
+          description: |
+            Service: {{ $labels.service }}
+            Capability: {{ $labels.capability }}
+            Tenant: {{ $labels.tenant }}
+            Current daily cost: ${{ $value | humanize }}
+            7-day average: ${{ $labels.avg_cost | default "N/A" }}
+            Threshold: 2x average over 30 minutes
+          runbook_url: "https://wiki.internal/runbooks/cost-anomaly"
+          cost_dashboard: "https://grafana.internal/d/finops?var-tenant={{ $labels.tenant }}"
+          owner_slack: "#finops-alerts"
+
       - alert: HourlyCostSpike
         expr: |
           (
-            sum(rate(span_cost_usd_total[1h])) >
-            3 * avg_over_time(sum(rate(span_cost_usd_total[1h]))[24h:1h])
+            sum by (service, capability, tenant) (
+              rate(span_cost_usd_total[1h])
+            ) >
+            3 * avg_over_time(
+              sum by (service, capability, tenant) (
+                rate(span_cost_usd_total[1h])
+              )[24h:1h]
+            )
           )
         for: 15m
         labels:
           severity: warning
+          owner: "finops-team@company.com"
+          paging_policy: "P2"
+          service: "{{ $labels.service }}"
+          capability: "{{ $labels.capability }}"
+          tenant: "{{ $labels.tenant }}"
           team: finops
           category: cost_control
         annotations:
-          summary: "Hourly cost spike detected (3x normal)"
-          description: "Current hourly rate: ${{ $value | humanize }}/hr"
-      
-      # Service-specific cost alerts
-      - alert: ServiceCostThreshold
+          summary: "Hourly cost spike (3x normal) for {{ $labels.tenant }}"
+          description: |
+            Service: {{ $labels.service }}
+            Current hourly rate: ${{ $value | humanize }}/hr
+            Normal rate: ~${{ $labels.normal_rate | default "N/A" }}/hr
+          owner_slack: "#finops-alerts"
+
+      - alert: TenantCostThreshold
         expr: |
-          sum by (service_name) (increase(span_cost_usd_total[1h])) > 100
+          sum by (tenant) (increase(span_cost_usd_total[1h])) > 100
         for: 10m
         labels:
           severity: info
-          team: finops
+          owner: "customer-success@company.com"
+          paging_policy: "P3"
+          tenant: "{{ $labels.tenant }}"
+          team: customer_success
         annotations:
-          summary: "Service {{ $labels.service_name }} exceeds $100/hr"
-          description: "Service cost: ${{ $value | humanize }}/hr"
-  
-  - name: data_governance_alerts
+          summary: "Tenant {{ $labels.tenant }} exceeds $100/hr"
+          description: |
+            Tenant: {{ $labels.tenant }}
+            Current hourly cost: ${{ $value | humanize }}
+            This may trigger billing alerts for the customer
+          owner_slack: "#customer-success"
+
+  - name: security_alerts
     interval: 30s
     rules:
-      # PII data access monitoring
-      - alert: UnauthorizedPIIAccess
+      - alert: PolicyBypassAttempt
         expr: |
-          sum(increase(data_access_total{data_tag="PII", authorized="false"}[5m])) > 0
+          sum by (service, user, action) (
+            increase(policy_bypass_attempts_total[5m])
+          ) > 0
         for: 1m
         labels:
           severity: critical
+          owner: "security-team@company.com"
+          paging_policy: "P0"
+          service: "{{ $labels.service }}"
+          user: "{{ $labels.user }}"
+          action: "{{ $labels.action }}"
           team: security
-          compliance: gdpr
+          siem_forward: "true"
         annotations:
-          summary: "Unauthorized PII data access detected"
-          description: "{{ $value }} unauthorized PII access attempts in last 5 minutes"
-          incident_response: "https://docs.internal/incident/pii-breach"
-      
-      # Data retention policy violations
-      - alert: DataRetentionViolation
+          summary: "Policy bypass attempt by {{ $labels.user }}"
+          description: |
+            User: {{ $labels.user }}
+            Service: {{ $labels.service }}
+            Action attempted: {{ $labels.action }}
+            Count in last 5m: {{ $value }}
+            SECURITY INCIDENT - Forwarded to SIEM
+          incident_response: "https://wiki.internal/security/bypass-response"
+          owner_slack: "#security-oncall"
+          siem_event_id: "SEC-{{ $labels.service }}-{{ $labels.user }}"
+
+      - alert: UnauthorizedDataAccess
         expr: |
-          data_age_days{data_tag="PII"} > 30 or
-          data_age_days{data_tag="SENSITIVE"} > 90 or
-          data_age_days{data_tag="EXPORT_OK"} > 365
-        for: 1h
+          sum by (service, capability, tenant, data_classification) (
+            increase(unauthorized_access_total[5m])
+          ) > 0
+        for: 1m
         labels:
-          severity: warning
-          team: data_governance
-          compliance: retention_policy
-        annotations:
-          summary: "Data retention policy violation for {{ $labels.data_tag }}"
-          description: "Data age: {{ $value }} days (limit: {{ $labels.retention_days }})"
-      
-      # SIEM event forwarding health
-      - alert: SIEMForwardingFailure
-        expr: |
-          up{job="siem_exporter"} == 0 or
-          rate(siem_events_failed_total[5m]) > 0.01
-        for: 5m
-        labels:
-          severity: warning
+          severity: critical
+          owner: "security-team@company.com"
+          paging_policy: "P0"
+          service: "{{ $labels.service }}"
+          capability: "{{ $labels.capability }}"
+          tenant: "{{ $labels.tenant }}"
+          data_classification: "{{ $labels.data_classification }}"
           team: security
+          siem_forward: "true"
         annotations:
-          summary: "SIEM event forwarding is failing"
-          description: "SIEM sink connectivity or forwarding errors detected"
-  
-  - name: hitl_safety_alerts
-    interval: 10s
-    rules:
-      # HITL bypass attempts
-      - alert: HITLBypassAttempt
-        expr: |
-          sum(increase(hitl_bypass_attempts_total[1m])) > 0
-        for: 1m
-        labels:
-          severity: critical
-          team: safety
-          category: human_in_the_loop
-        annotations:
-          summary: "HITL safety bypass attempt detected"
-          description: "{{ $value }} bypass attempts for {{ $labels.action_type }}"
-          security_response: "https://docs.internal/security/hitl-bypass"
-      
-      # Robot actuation without approval
-      - alert: UnauthorizedRobotActuation
-        expr: |
-          robot_actuation_total{approved="false"} > 0
-        for: 1m
-        labels:
-          severity: critical
-          team: robotics
-          safety: physical_safety
-        annotations:
-          summary: "Unauthorized robot actuation detected"
-          description: "Robot {{ $labels.robot_id }} attempted unauthorized actuation"
-          emergency_stop: "https://control.internal/emergency-stop"
+          summary: "Unauthorized {{ $labels.data_classification }} access in {{ $labels.service }}"
+          description: |
+            Service: {{ $labels.service }}
+            Tenant: {{ $labels.tenant }}
+            Data Classification: {{ $labels.data_classification }}
+            Attempts: {{ $value }}
+          owner_slack: "#security-oncall"
+
+# Alert routing configuration (for Alertmanager)
+routing_config:
+  routes:
+    - match:
+        paging_policy: P0
+      receiver: pagerduty_critical
+      continue: true
+    - match:
+        paging_policy: P1
+      receiver: pagerduty_high
+      continue: true
+    - match:
+        paging_policy: P2
+      receiver: slack_notifications
+      continue: true
+    - match:
+        paging_policy: P3
+      receiver: email_daily
+    - match:
+        siem_forward: "true"
+      receiver: siem_webhook
+
+  receivers:
+    - name: pagerduty_critical
+      webhook_configs:
+        - url: "https://events.pagerduty.com/v2/enqueue"
+    - name: pagerduty_high
+      webhook_configs:
+        - url: "https://events.pagerduty.com/v2/enqueue"
+    - name: slack_notifications
+      slack_configs:
+        - api_url: "${SLACK_WEBHOOK_URL}"
+    - name: email_daily
+      email_configs:
+        - to: "oncall-digest@company.com"
+    - name: siem_webhook
+      webhook_configs:
+        - url: "https://siem-stub.internal/webhook"

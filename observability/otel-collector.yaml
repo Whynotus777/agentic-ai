@@ -1,4 +1,5 @@
-# observability/otel-collector.yaml
+﻿# observability/otel-collector.yaml
+# EXTENDED: Added cost_usd processor and SIEM exporter stub
 receivers:
   otlp:
     protocols:
@@ -6,52 +7,38 @@ receivers:
         endpoint: 0.0.0.0:4317
       http:
         endpoint: 0.0.0.0:4318
-  prometheus:
-    config:
-      scrape_configs:
-        - job_name: 'otel-collector'
-          scrape_interval: 10s
-          static_configs:
-            - targets: ['localhost:8888']
 
 processors:
   batch:
     timeout: 10s
     send_batch_size: 1024
-  
-  # Cost injection processor
+    send_batch_max_size: 2048
+
+  # Cost attribution processor - adds cost_usd to all spans
   attributes/cost:
     actions:
       - key: cost_usd
-        value: 0.0001  # Placeholder: $0.0001 per span base cost
-        action: insert
+        value: 0.0001  # Base cost per span (placeholder)
+        action: upsert
+      # Adjust cost based on span attributes
       - key: cost_usd
-        from_attribute: span.duration_ms
+        value: 0.001
         action: update
-        # Formula: base_cost + (duration_ms * 0.000001)
-        # This is a simplified placeholder - replace with actual cost model
-  
-  # Data classification processor
-  attributes/classification:
-    actions:
-      - key: data_tag
-        value: EXPORT_OK
-        action: insert
-      - key: data_tag
-        value: PII
+        from_attribute: operation
+        converted_type: double
+        # Higher cost for tool invocations
+        filter:
+          match_type: regexp
+          span_names: ["tool.*", "llm.*", "model.*"]
+      # Even higher cost for robot operations
+      - key: cost_usd
+        value: 0.01
         action: update
-        from_attribute: user.id
-      - key: data_tag
-        value: SENSITIVE
-        action: update
-        from_attribute: auth.token
-  
-  # Sampling processor
-  probabilistic_sampler:
-    sampling_percentage: 10
-    hash_seed: 22
-  
-  # Resource detection
+        filter:
+          match_type: regexp
+          span_names: ["robot.*", "actuate.*"]
+
+  # Resource processor for standard labels
   resource:
     attributes:
       - key: service.namespace
@@ -62,81 +49,82 @@ processors:
         action: insert
 
 exporters:
-  # Primary observability backend
+  # Primary telemetry backend
   otlp/primary:
-    endpoint: "observability-backend:4317"
+    endpoint: "telemetry-backend:4317"
     tls:
       insecure: false
-    sending_queue:
-      enabled: true
-      num_consumers: 10
-      queue_size: 5000
     retry_on_failure:
       enabled: true
       initial_interval: 5s
       max_interval: 30s
       max_elapsed_time: 300s
-  
-  # SIEM sink for critical events
+
+  # SIEM sink stub for critical security events
   otlp/siem:
-    endpoint: "siem-endpoint.internal:4318"  # Stub endpoint
+    endpoint: "siem-stub.internal:4318"  # Stub endpoint
     headers:
-      X-SIEM-Token: "${env:SIEM_TOKEN}"
+      X-SIEM-API-Key: "${env:SIEM_API_KEY}"
+      X-Event-Source: "otel-collector"
     sending_queue:
       enabled: true
       queue_size: 1000
-  
-  # Prometheus for metrics
+    # Only send high-severity events
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 10s
+
+  # Prometheus for metrics/alerts
   prometheus:
     endpoint: "0.0.0.0:8889"
     namespace: otel
     const_labels:
       environment: production
-  
-  # Debug/logging exporter
+
+  # Debug logging (disabled in prod)
   logging:
-    loglevel: debug
-    sampling_initial: 5
-    sampling_thereafter: 200
+    loglevel: info
+    sampling_initial: 10
+    sampling_thereafter: 100
 
 extensions:
   health_check:
     endpoint: 0.0.0.0:13133
   pprof:
     endpoint: 0.0.0.0:1777
-  zpages:
-    endpoint: 0.0.0.0:55679
 
 service:
-  extensions: [health_check, pprof, zpages]
+  extensions: [health_check, pprof]
   
   pipelines:
+    # Main trace pipeline with cost attribution
     traces:
       receivers: [otlp]
-      processors: [batch, attributes/cost, attributes/classification, probabilistic_sampler, resource]
-      exporters: [otlp/primary, logging]
-    
-    metrics:
-      receivers: [otlp, prometheus]
       processors: [batch, attributes/cost, resource]
+      exporters: [otlp/primary]
+    
+    # Metrics pipeline
+    metrics:
+      receivers: [otlp]
+      processors: [batch, resource]
       exporters: [prometheus, otlp/primary]
     
+    # Main logs pipeline
     logs:
       receivers: [otlp]
-      processors: [batch, attributes/classification, resource]
-      exporters: [otlp/primary, logging]
+      processors: [batch, resource]
+      exporters: [otlp/primary]
     
-    # Critical events pipeline to SIEM
-    logs/critical:
+    # Security events to SIEM
+    logs/security:
       receivers: [otlp]
-      processors: [batch, attributes/classification]
+      processors: [batch]
       exporters: [otlp/siem]
 
-# Telemetry configuration
 telemetry:
   logs:
     level: info
-    development: false
     encoding: json
   metrics:
     level: detailed

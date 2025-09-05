@@ -1,387 +1,211 @@
-# Run Manifest Schema
+# Run Manifest Specification
 
 ## Overview
-The run manifest is an immutable record of a task execution, enabling replay without side-effect duplication and providing audit trail for compliance.
+The run manifest is a persistent record of each execution run, providing audit trail, replay capability, and exactly-once guarantees.
 
-## Schema Definition
-
-```typescript
-interface RunManifest {
-  // Identifiers
-  run_id: string;                    // Unique execution identifier
-  tenant_id: string;                 // Tenant isolation boundary
-  idempotency_key: string;          // Deduplication key
-  trace_id: string;                 // Distributed trace correlation
-  correlation_id: string;           // Request correlation
-  
-  // Execution Details
-  inputs_sha: string;               // SHA256 of input payload
-  executed_at: string;              // ISO8601 timestamp
-  attempt: number;                  // Retry attempt number (0-based)
-  replayed: boolean;                // True if replayed from manifest
-  
-  // Tools & Side Effects
-  tools: ToolInvocation[];          // External tool calls made
-  artifacts: Artifact[];            // Generated artifacts
-  outputs: Record<string, any>;     // Execution outputs
-  
-  // Security & Compliance
-  signatures: Signature[];          // Cryptographic signatures
-  policy_mode: PolicyMode;          // Execution policy applied
-  approvals: Approval[];            // Required approvals
-  
-  // Metadata
-  metadata: {
-    message_id: string;
-    priority: number;
-    submitted_at: string;
-    execution_duration_ms?: number;
-    worker_id?: string;
-  };
-}
-
-interface ToolInvocation {
-  tool_name: string;
-  invoked_at: string;
-  parameters: Record<string, any>;
-  result: {
-    status: "success" | "failure";
-    data?: any;
-    error?: string;
-  };
-  idempotency_token?: string;      // For tool-level idempotency
-}
-
-interface Artifact {
-  artifact_id: string;
-  type: "file" | "database" | "api_response" | "state_change";
-  location: string;                 // URI or path
-  size_bytes?: number;
-  checksum?: string;
-  created_at: string;
-  metadata?: Record<string, any>;
-}
-
-interface Signature {
-  signer: string;                   // Identity of signer
-  algorithm: "RS256" | "ES256";
-  signature: string;                 // Base64 encoded
-  signed_at: string;
-  scope: string[];                  // What was signed
-}
-
-type PolicyMode = "standard" | "strict" | "audit" | "bypass";
-
-interface Approval {
-  approver: string;
-  approved_at: string;
-  approval_type: "manual" | "automated" | "policy";
-  reason?: string;
-}
-```
-
-## JSON Example - Standard Execution
+## Schema
 
 ```json
 {
-  "run_id": "run_a1b2c3d4e5f6",
-  "tenant_id": "tenant-001",
-  "idempotency_key": "process-order-12345",
-  "trace_id": "trace_9f8e7d6c5b4a",
-  "correlation_id": "req_xyz789",
-  
-  "inputs_sha": "3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c",
-  "executed_at": "2025-09-05T14:30:00.000Z",
-  "attempt": 0,
-  "replayed": false,
-  
-  "tools": [
-    {
-      "tool_name": "payment_processor",
-      "invoked_at": "2025-09-05T14:30:01.123Z",
-      "parameters": {
-        "amount": 99.99,
-        "currency": "USD",
-        "payment_method": "card_ending_4242"
-      },
-      "result": {
-        "status": "success",
-        "data": {
-          "transaction_id": "tx_abc123",
-          "authorization_code": "AUTH789"
-        }
-      },
-      "idempotency_token": "pay_idem_xyz"
-    },
-    {
-      "tool_name": "inventory_service",
-      "invoked_at": "2025-09-05T14:30:02.456Z",
-      "parameters": {
-        "action": "reserve",
-        "items": [
-          {"sku": "WIDGET-001", "quantity": 2}
-        ]
-      },
-      "result": {
-        "status": "success",
-        "data": {
-          "reservation_id": "res_def456",
-          "expires_at": "2025-09-05T15:30:02.456Z"
-        }
-      }
-    }
-  ],
-  
-  "artifacts": [
-    {
-      "artifact_id": "art_invoice_789",
-      "type": "file",
-      "location": "s3://artifacts/tenant-001/invoices/INV-2025-09-12345.pdf",
-      "size_bytes": 245632,
-      "checksum": "sha256:4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f",
-      "created_at": "2025-09-05T14:30:03.789Z",
-      "metadata": {
-        "invoice_number": "INV-2025-09-12345",
-        "format": "PDF/A-2b"
-      }
-    }
-  ],
-  
-  "outputs": {
-    "order_id": "ORD-2025-09-12345",
-    "status": "confirmed",
-    "estimated_delivery": "2025-09-08",
-    "tracking_number": "1Z999AA1234567890"
-  },
-  
-  "signatures": [
-    {
-      "signer": "system-executor",
-      "algorithm": "RS256",
-      "signature": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
-      "signed_at": "2025-09-05T14:30:04.000Z",
-      "scope": ["inputs", "outputs", "tools"]
-    }
-  ],
-  
-  "policy_mode": "standard",
-  "approvals": [],
-  
-  "metadata": {
-    "message_id": "msg_qrs456",
-    "priority": 5,
-    "submitted_at": "2025-09-05T14:29:55.000Z",
-    "execution_duration_ms": 4125,
-    "worker_id": "worker-2"
-  }
+  "run_id": "string (UUID)",
+  "idempotency_key": "string",
+  "operation": "string",
+  "payload": "object",
+  "approvals": "array",
+  "policy_mode": "string",
+  "created_at": "ISO 8601 timestamp",
+  "status": "string",
+  "result": "object (optional)",
+  "error": "string (optional)",
+  "applied_at": "ISO 8601 timestamp (optional)",
+  "committed_at": "ISO 8601 timestamp (optional)",
+  "failed_at": "ISO 8601 timestamp (optional)",
+  "written_at": "ISO 8601 timestamp"
 }
 ```
 
-## JSON Example - Replayed Execution
+## Field Descriptions
+
+### Core Fields
+- **run_id**: Unique identifier for this execution run (UUID v4)
+- **idempotency_key**: Client-provided key for exactly-once semantics
+- **operation**: The operation type (commit, actuate, analyze, etc.)
+- **payload**: Operation-specific parameters and data
+- **created_at**: When the run was initiated
+- **written_at**: When the manifest was last written to disk
+
+### Policy Fields (NEW)
+- **approvals**: Array of approval records for HITL operations
+  - Each approval contains:
+    - `approver`: User/system that approved
+    - `decision`: approve/reject
+    - `timestamp`: When approved
+    - `reason`: Optional approval reason
+    - `token`: Approval token used
+- **policy_mode**: Policy enforcement mode
+  - `enforce`: Strict policy enforcement (default)
+  - `monitor`: Log violations but allow execution
+  - `bypass`: Skip policy checks (requires elevated privileges)
+
+### Status Fields
+- **status**: Current execution status
+  - `dispatched`: Initial state, queued for execution
+  - `applied`: Side effects have been applied
+  - `committed`: Successfully committed to ledger
+  - `failed`: Execution failed
+  - `rolled_back`: Applied but then rolled back
+
+### Result Fields
+- **result**: Execution result (when status is committed)
+- **error**: Error message (when status is failed)
+- **applied_at**: When side effects were applied
+- **committed_at**: When execution was committed
+- **failed_at**: When execution failed
+
+## Example Manifest
 
 ```json
 {
-  "run_id": "run_replay_7g8h9i",
-  "tenant_id": "tenant-001",
-  "idempotency_key": "process-order-12345",
-  "trace_id": "trace_replay_3c4d5e",
-  "correlation_id": "req_replay_mno",
-  
-  "inputs_sha": "3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c",
-  "executed_at": "2025-09-05T15:45:00.000Z",
-  "attempt": 2,
-  "replayed": true,
-  
-  "tools": [],
-  
-  "artifacts": [
-    {
-      "artifact_id": "art_invoice_789",
-      "type": "file",
-      "location": "s3://artifacts/tenant-001/invoices/INV-2025-09-12345.pdf",
-      "size_bytes": 245632,
-      "checksum": "sha256:4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f",
-      "created_at": "2025-09-05T14:30:03.789Z",
-      "metadata": {
-        "note": "Artifact from original execution",
-        "original_run_id": "run_a1b2c3d4e5f6"
-      }
-    }
-  ],
-  
-  "outputs": {
-    "order_id": "ORD-2025-09-12345",
-    "status": "confirmed",
-    "replayed_from": "run_a1b2c3d4e5f6",
-    "note": "Execution replayed from manifest - no side effects repeated"
+  "run_id": "550e8400-e29b-41d4-a716-446655440000",
+  "idempotency_key": "client-key-12345",
+  "operation": "commit",
+  "payload": {
+    "repository": "main-repo",
+    "branch": "feature/update",
+    "files": ["src/main.py", "tests/test_main.py"],
+    "message": "Update main functionality"
   },
-  
-  "signatures": [
-    {
-      "signer": "replay-validator",
-      "algorithm": "ES256",
-      "signature": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9...",
-      "signed_at": "2025-09-05T15:45:01.000Z",
-      "scope": ["replay", "manifest_integrity"]
-    }
-  ],
-  
-  "policy_mode": "standard",
-  "approvals": [],
-  
-  "metadata": {
-    "message_id": "msg_replay_tuv",
-    "priority": 5,
-    "submitted_at": "2025-09-05T15:44:58.000Z",
-    "execution_duration_ms": 125,
-    "worker_id": "worker-1",
-    "replay_reason": "worker_failure_recovery"
-  }
-}
-```
-
-## JSON Example - Failed Execution with Compensating Action
-
-```json
-{
-  "run_id": "run_failed_jkl789",
-  "tenant_id": "tenant-002",
-  "idempotency_key": "complex-workflow-67890",
-  "trace_id": "trace_fail_6f7g8h",
-  "correlation_id": "req_fail_pqr",
-  
-  "inputs_sha": "9f8e7d6c5b4a3b2c1d0e9f8e7d6c5b4a3b2c1d0e9f8e7d6c5b4a3b2c1d0e9f8e",
-  "executed_at": "2025-09-05T16:00:00.000Z",
-  "attempt": 3,
-  "replayed": false,
-  
-  "tools": [
-    {
-      "tool_name": "database_transaction",
-      "invoked_at": "2025-09-05T16:00:01.234Z",
-      "parameters": {
-        "operation": "update",
-        "table": "inventory",
-        "conditions": {"sku": "ITEM-999"}
-      },
-      "result": {
-        "status": "success",
-        "data": {
-          "rows_affected": 1,
-          "transaction_id": "txn_db_456"
-        }
-      }
-    },
-    {
-      "tool_name": "external_api",
-      "invoked_at": "2025-09-05T16:00:02.567Z",
-      "parameters": {
-        "endpoint": "/v1/process",
-        "method": "POST"
-      },
-      "result": {
-        "status": "failure",
-        "error": "Connection timeout after 30000ms"
-      }
-    }
-  ],
-  
-  "artifacts": [],
-  
-  "outputs": {
-    "status": "failed",
-    "error": "External API timeout",
-    "partial_completion": true,
-    "rollback_required": true,
-    "compensating_action_ref": "compensate/tenant-002/msg_fail_xyz"
-  },
-  
-  "signatures": [],
-  
-  "policy_mode": "strict",
   "approvals": [
     {
-      "approver": "system-policy",
-      "approved_at": "2025-09-05T15:59:59.000Z",
-      "approval_type": "policy",
-      "reason": "Automatic approval for retry attempt"
+      "approver": "user@example.com",
+      "decision": "approve",
+      "timestamp": "2024-01-15T10:30:00Z",
+      "reason": "Code review passed",
+      "token": "approval-token-abc123"
     }
   ],
-  
-  "metadata": {
-    "message_id": "msg_fail_xyz",
-    "priority": 3,
-    "submitted_at": "2025-09-05T15:59:30.000Z",
-    "execution_duration_ms": 31800,
-    "worker_id": "worker-4",
-    "failure_classification": "transient_network",
-    "dlq_entry": true
-  }
+  "policy_mode": "enforce",
+  "created_at": "2024-01-15T10:00:00Z",
+  "status": "committed",
+  "result": {
+    "operation": "commit",
+    "executed_at": "2024-01-15T10:31:00Z",
+    "side_effects": [
+      {
+        "type": "git_commit",
+        "commit_id": "abc550e8",
+        "files_changed": ["src/main.py", "tests/test_main.py"]
+      }
+    ]
+  },
+  "applied_at": "2024-01-15T10:31:00Z",
+  "committed_at": "2024-01-15T10:31:05Z",
+  "written_at": "2024-01-15T10:31:05Z"
 }
 ```
 
-## Manifest Usage Patterns
+## Replay Semantics
 
-### 1. Replay Detection
-Before executing, check for existing manifest:
+### Exactly-Once Guarantee
+When a request with the same `idempotency_key` is received:
+1. System checks for existing manifest with that key
+2. If found and status is `committed`: Return cached result (no re-execution)
+3. If found and status is `failed`: Return cached error
+4. If found and status is `dispatched` or `applied`: Attempt recovery
+
+### Crash Recovery
+If the system crashes during execution:
+1. On restart, scan for incomplete manifests (status: `dispatched` or `applied`)
+2. Check apply ledger for commit status
+3. If committed in ledger: Update manifest and return result
+4. If not committed: Safe to retry operation (no side effects were persisted)
+
+### Write-Through Policy
+Manifests are written at multiple points:
+1. **On dispatch**: Initial manifest with status `dispatched`
+2. **After apply**: Updated with result and status `applied`
+3. **After commit**: Final update with status `committed`
+4. **On failure**: Updated with error and status `failed`
+
+This ensures the manifest always reflects the current state, even if the process crashes.
+
+## Approval Integration
+
+### HITL Approval Flow
+1. Operation requires approval (based on policy)
+2. System returns `HITL_REQUIRED` status with approval link
+3. Human approver reviews and approves/rejects
+4. Approval record added to manifest `approvals` array
+5. Operation proceeds if approved
+
+### Approval Record Schema
+```json
+{
+  "approver": "string (email or system ID)",
+  "decision": "approve | reject",
+  "timestamp": "ISO 8601 timestamp",
+  "reason": "string (optional)",
+  "token": "string (approval token)"
+}
+```
+
+## Policy Mode Behavior
+
+### Enforce Mode (Default)
+- All policies strictly enforced
+- Violations block execution
+- Approvals required for risky operations
+
+### Monitor Mode
+- Policy violations logged but not blocking
+- Useful for testing and gradual rollout
+- Approvals still recorded but not required
+
+### Bypass Mode
+- Skip all policy checks
+- Requires elevated privileges
+- Should be used sparingly and audited
+
+## File Storage
+
+Manifests are stored as JSON files:
+- Location: `/tmp/manifests/manifest_{run_id}.json`
+- Format: Pretty-printed JSON with 2-space indentation
+- Retention: Configurable (default: 7 days)
+
+## Usage Examples
+
+### Reading a Manifest
 ```python
-manifest_path = get_manifest_path(tenant_id, run_id)
-if manifest_path.exists():
-    # Load and return cached results
-    return load_manifest(manifest_path)
+from execution.state_ledger import StateLedger
+
+ledger = StateLedger()
+manifest = ledger.get_run_manifest("550e8400-e29b-41d4-a716-446655440000")
+print(f"Status: {manifest['status']}")
+print(f"Approvals: {manifest['approvals']}")
 ```
 
-### 2. Audit Trail
-All manifests are immutable once written:
+### Writing a Manifest
 ```python
-# Manifests are write-once
-manifest = create_manifest(execution_result)
-save_manifest(manifest)  # No updates allowed
+manifest = {
+    "run_id": run_id,
+    "idempotency_key": idempotency_key,
+    "operation": "commit",
+    "payload": payload,
+    "approvals": [approval_record],
+    "policy_mode": "enforce",
+    "created_at": datetime.utcnow().isoformat(),
+    "status": "dispatched"
+}
+
+ledger.write_run_manifest(run_id, manifest)
 ```
 
-### 3. Compensating Actions
-For failed executions in DLQ:
-```python
-if execution.failed and execution.attempts >= max_retries:
-    manifest["outputs"]["compensating_action_ref"] = create_compensating_action(
-        execution, 
-        manifest["tools"]  # Include partial progress
-    )
-```
+## Best Practices
 
-### 4. Integrity Verification
-Signatures ensure manifest hasn't been tampered:
-```python
-def verify_manifest(manifest):
-    for signature in manifest["signatures"]:
-        if not verify_signature(signature, manifest):
-            raise IntegrityError("Manifest signature invalid")
-```
-
-## Storage Layout
-
-```
-/var/lib/execution/manifests/
-├── tenant-001/
-│   ├── run_a1b2c3d4e5f6/
-│   │   └── manifest.json
-│   ├── run_replay_7g8h9i/
-│   │   └── manifest.json
-│   └── ...
-├── tenant-002/
-│   ├── run_failed_jkl789/
-│   │   └── manifest.json
-│   └── ...
-└── compensating_actions/
-    ├── tenant-001/
-    │   └── msg_xyz.json
-    └── tenant-002/
-        └── msg_fail_xyz.json
-```
-
-## Retention Policy
-
-- **Active Manifests**: Retained for idempotency window (24 hours minimum)
-- **Completed Manifests**: 90 days standard retention
-- **Failed/DLQ Manifests**: 30 days + compensating action period
-- **Compliance Mode**: 7 years with tamper-proof storage
+1. **Always include approvals**: Even if empty array
+2. **Set appropriate policy_mode**: Default to `enforce` for production
+3. **Write manifest early**: Before any side effects
+4. **Update status atomically**: Use ledger transactions
+5. **Include timestamps**: For all state transitions
+6. **Preserve idempotency_key**: Essential for replay

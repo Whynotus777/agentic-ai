@@ -1,451 +1,334 @@
-# observability/tracing.md
-
-## Distributed Tracing Implementation
-
-### Overview
-This document extends the tracing implementation to include trace ID propagation, sampling rules, and cost attribution across all services.
+﻿# observability/tracing.md
+# EXTENDED: Trace propagation examples across ORCH→QUEUE→TOOLS with cost_usd
 
 ## Trace Context Propagation
 
-### W3C Trace Context Standard
-We implement the W3C Trace Context standard for trace propagation:
+### Overview
+This document demonstrates trace_id propagation across the orchestrator → queue → tools pipeline, including cost_usd attribution at each step.
 
-```
-traceparent: 00-{trace_id}-{parent_id}-{trace_flags}
-tracestate: cost_usd=0.0001,data_tag=PII
-```
+## Trace Flow Example: ORCH → QUEUE → TOOLS
 
-### Implementation Examples
+### 1. Orchestrator Initiates Trace
 
-#### HTTP Headers
 ```python
-# Python/Flask example
-from opentelemetry import trace
-from opentelemetry.propagate import inject
+# orchestrator.py
+from opentelemetry import trace, baggage
+from opentelemetry.propagate import inject, extract
+import json
 
-def make_request(url, data):
-    tracer = trace.get_tracer(__name__)
+tracer = trace.get_tracer("orchestrator")
+
+def process_request(request_id, task_spec):
+    """Orchestrator starts a trace and enqueues work"""
     
-    with tracer.start_as_current_span("http_request") as span:
-        # Add cost attribution
-        span.set_attribute("cost_usd", 0.0001)
-        span.set_attribute("data_tag", "EXPORT_OK")
+    # Start root span with cost attribution
+    with tracer.start_as_current_span("orchestrate_task") as span:
+        span.set_attribute("request_id", request_id)
+        span.set_attribute("cost_usd", 0.0001)  # Base orchestration cost
+        span.set_attribute("service", "orchestrator")
+        span.set_attribute("capability", "task_planning")
+        span.set_attribute("tenant", task_spec.get("tenant_id"))
         
+        # Get trace_id for logging
+        trace_id = format(span.get_span_context().trace_id, '032x')
+        span.set_attribute("trace_id", trace_id)
+        
+        # Prepare message for queue
+        message = {
+            "task_id": f"task_{request_id}",
+            "spec": task_spec,
+            "timestamp": time.time()
+        }
+        
+        # Inject trace context into message headers
         headers = {}
         inject(headers)  # Injects traceparent and tracestate
         
-        response = requests.post(url, json=data, headers=headers)
-        return response
+        # Add to queue with trace context
+        queue_client.send_message(
+            queue_name="task_queue",
+            body=json.dumps(message),
+            headers=headers,
+            attributes={
+                "trace_id": trace_id,
+                "cost_usd": "0.0001"
+            }
+        )
+        
+        print(f"Task enqueued with trace_id: {trace_id}")
+        return trace_id
+```
+
+### 2. Queue Processor Continues Trace
+
+```python
+# queue_processor.py
+from opentelemetry import trace
+from opentelemetry.propagate import inject, extract
+from opentelemetry.trace import Status, StatusCode
+
+tracer = trace.get_tracer("queue_processor")
+
+def process_queue_message(message, headers):
+    """Process message from queue, continuing the trace"""
+    
+    # Extract parent trace context
+    ctx = extract(headers)
+    
+    # Continue trace from parent context
+    with tracer.start_as_current_span(
+        "process_queue_message",
+        context=ctx
+    ) as span:
+        # Add queue processing cost
+        span.set_attribute("cost_usd", 0.00005)  # Queue processing cost
+        span.set_attribute("service", "queue_processor")
+        span.set_attribute("capability", "message_routing")
+        
+        # Parse message
+        task = json.loads(message)
+        span.set_attribute("task_id", task["task_id"])
+        span.set_attribute("tenant", task["spec"].get("tenant_id"))
+        
+        # Get trace_id for correlation
+        trace_id = format(span.get_span_context().trace_id, '032x')
+        print(f"Processing task {task['task_id']} in trace {trace_id}")
+        
+        # Route to appropriate tool
+        tool_name = determine_tool(task["spec"])
+        span.set_attribute("target_tool", tool_name)
+        
+        # Prepare tool invocation with trace context
+        tool_headers = {}
+        inject(tool_headers)
+        
+        # Call tool with trace propagation
+        result = invoke_tool(
+            tool_name=tool_name,
+            task=task,
+            headers=tool_headers
+        )
+        
+        span.set_attribute("tool_result_status", result.get("status"))
+        
+        # Accumulate cost
+        total_cost = 0.00005 + result.get("cost_usd", 0)
+        span.set_attribute("accumulated_cost_usd", total_cost)
+        
+        return result
+```
+
+### 3. Tool Execution Completes Trace
+
+```python
+# tool_executor.py
+from opentelemetry import trace
+from opentelemetry.propagate import extract
+import time
+
+tracer = trace.get_tracer("tool_executor")
+
+def execute_tool(tool_name, task, headers):
+    """Execute tool operation, completing the trace"""
+    
+    # Extract parent context from headers
+    ctx = extract(headers)
+    
+    # Continue trace
+    with tracer.start_as_current_span(
+        f"execute_{tool_name}",
+        context=ctx
+    ) as span:
+        start_time = time.time()
+        
+        # Set tool-specific attributes
+        span.set_attribute("service", "tool_executor")
+        span.set_attribute("capability", tool_name)
+        span.set_attribute("tenant", task["spec"].get("tenant_id"))
+        span.set_attribute("tool.name", tool_name)
+        span.set_attribute("tool.version", "1.0.0")
+        
+        # Calculate tool-specific cost
+        tool_costs = {
+            "code_generator": 0.001,
+            "test_runner": 0.0005,
+            "deployment_tool": 0.002,
+            "llm_inference": 0.005,
+            "robot_control": 0.01
+        }
+        
+        base_cost = tool_costs.get(tool_name, 0.0001)
+        span.set_attribute("cost_usd", base_cost)
+        
+        try:
+            # Execute actual tool logic
+            result = tool_implementations[tool_name](task)
+            
+            # Adjust cost based on execution time
+            execution_time = time.time() - start_time
+            final_cost = base_cost * (1 + execution_time * 0.01)
+            span.set_attribute("cost_usd", round(final_cost, 6))
+            span.set_attribute("execution_time_ms", execution_time * 1000)
+            
+            # Get complete trace_id
+            trace_id = format(span.get_span_context().trace_id, '032x')
+            
+            result["trace_id"] = trace_id
+            result["cost_usd"] = final_cost
+            
+            print(f"Tool {tool_name} completed in trace {trace_id}, cost: ${final_cost}")
+            
+            return result
+            
+        except Exception as e:
+            span.record_exception(e)
+            span.set_status(Status(StatusCode.ERROR))
+            span.set_attribute("error", True)
+            raise
+```
+
+## Sample Trace with cost_usd
+
+### Complete Trace Example
+
+```json
+{
+  "trace_id": "7d3f4e8a9b2c1d5e6f7a8b9c0d1e2f3a",
+  "spans": [
+    {
+      "span_id": "1a2b3c4d5e6f7890",
+      "parent_span_id": null,
+      "operation_name": "orchestrate_task",
+      "service": "orchestrator",
+      "capability": "task_planning",
+      "tenant": "tenant_123",
+      "start_time": "2024-01-15T10:00:00.000Z",
+      "end_time": "2024-01-15T10:00:00.100Z",
+      "attributes": {
+        "request_id": "req_456",
+        "cost_usd": 0.0001,
+        "trace_id": "7d3f4e8a9b2c1d5e6f7a8b9c0d1e2f3a"
+      }
+    },
+    {
+      "span_id": "2b3c4d5e6f789012",
+      "parent_span_id": "1a2b3c4d5e6f7890",
+      "operation_name": "process_queue_message",
+      "service": "queue_processor",
+      "capability": "message_routing",
+      "tenant": "tenant_123",
+      "start_time": "2024-01-15T10:00:00.100Z",
+      "end_time": "2024-01-15T10:00:00.150Z",
+      "attributes": {
+        "task_id": "task_req_456",
+        "target_tool": "code_generator",
+        "cost_usd": 0.00005,
+        "accumulated_cost_usd": 0.00115
+      }
+    },
+    {
+      "span_id": "3c4d5e6f78901234",
+      "parent_span_id": "2b3c4d5e6f789012",
+      "operation_name": "execute_code_generator",
+      "service": "tool_executor",
+      "capability": "code_generator",
+      "tenant": "tenant_123",
+      "start_time": "2024-01-15T10:00:00.150Z",
+      "end_time": "2024-01-15T10:00:00.250Z",
+      "attributes": {
+        "tool.name": "code_generator",
+        "tool.version": "1.0.0",
+        "execution_time_ms": 100,
+        "cost_usd": 0.0011,
+        "trace_id": "7d3f4e8a9b2c1d5e6f7a8b9c0d1e2f3a"
+      }
+    }
+  ],
+  "total_cost_usd": 0.00125,
+  "total_duration_ms": 250
+}
+```
+
+## Trace Context Headers
+
+### W3C Trace Context Format
+```
+traceparent: 00-7d3f4e8a9b2c1d5e6f7a8b9c0d1e2f3a-1a2b3c4d5e6f7890-01
+tracestate: cost_usd=0.0001,tenant=tenant_123,capability=task_planning
+```
+
+### Propagation Through Different Transports
+
+#### HTTP Headers
+```http
+GET /api/v1/tool/execute HTTP/1.1
+traceparent: 00-7d3f4e8a9b2c1d5e6f7a8b9c0d1e2f3a-2b3c4d5e6f789012-01
+tracestate: cost_usd=0.00015,tenant=tenant_123
+X-Trace-Id: 7d3f4e8a9b2c1d5e6f7a8b9c0d1e2f3a
+X-Parent-Span: 2b3c4d5e6f789012
+X-Cost-USD: 0.00015
+```
+
+#### Message Queue Attributes
+```json
+{
+  "message_attributes": {
+    "traceparent": "00-7d3f4e8a9b2c1d5e6f7a8b9c0d1e2f3a-1a2b3c4d5e6f7890-01",
+    "tracestate": "cost_usd=0.0001",
+    "trace_id": "7d3f4e8a9b2c1d5e6f7a8b9c0d1e2f3a",
+    "cost_usd": "0.0001"
+  }
+}
 ```
 
 #### gRPC Metadata
 ```python
-# Python/gRPC example
-import grpc
-from opentelemetry.instrumentation.grpc import GrpcInstrumentorClient
-
-def call_grpc_service(stub, request):
-    tracer = trace.get_tracer(__name__)
-    
-    with tracer.start_as_current_span("grpc_call") as span:
-        span.set_attribute("cost_usd", 0.0002)
-        
-        metadata = []
-        inject(dict(metadata))  # Propagate trace context
-        
-        response = stub.ProcessRequest(request, metadata=metadata)
-        return response
+metadata = [
+    ('traceparent', '00-7d3f4e8a9b2c1d5e6f7a8b9c0d1e2f3a-3c4d5e6f78901234-01'),
+    ('tracestate', 'cost_usd=0.001'),
+    ('x-trace-id', '7d3f4e8a9b2c1d5e6f7a8b9c0d1e2f3a'),
+    ('x-cost-usd', '0.001')
+]
 ```
 
-#### Message Queue Headers
-```python
-# RabbitMQ/Kafka example
-def publish_message(channel, message):
-    tracer = trace.get_tracer(__name__)
-    
-    with tracer.start_as_current_span("publish_message") as span:
-        span.set_attribute("cost_usd", 0.00005)
-        
-        headers = {}
-        inject(headers)
-        
-        # For RabbitMQ
-        channel.basic_publish(
-            exchange='',
-            routing_key='task_queue',
-            body=json.dumps(message),
-            properties=pika.BasicProperties(headers=headers)
-        )
-```
+## Cost Aggregation Query Examples
 
-## Sampling Rules
-
-### Adaptive Sampling Configuration
-```yaml
-# sampling_rules.yaml
-sampling:
-  # Default sampling rate
-  default_rate: 0.1  # 10% of traces
-  
-  # Service-specific rates
-  service_rates:
-    payment_service: 1.0      # 100% for critical service
-    analytics_service: 0.01   # 1% for high-volume service
-    robot_control: 1.0        # 100% for safety-critical
-  
-  # Priority sampling rules
-  priority_rules:
-    - name: "Error traces"
-      condition: "error = true"
-      sample_rate: 1.0
-    
-    - name: "High cost operations"
-      condition: "cost_usd > 0.01"
-      sample_rate: 1.0
-    
-    - name: "HITL operations"
-      condition: "hitl_required = true"
-      sample_rate: 1.0
-    
-    - name: "PII data access"
-      condition: "data_tag = PII"
-      sample_rate: 1.0
-    
-    - name: "Slow requests"
-      condition: "duration_ms > 1000"
-      sample_rate: 0.5
-  
-  # Adaptive sampling based on traffic
-  adaptive:
-    enabled: true
-    target_traces_per_second: 100
-    min_sampling_rate: 0.001
-    max_sampling_rate: 1.0
-    adjustment_interval: 60s
-```
-
-### Sampling Decision Propagation
-```python
-# Ensure sampling decision is propagated
-def should_sample(span_context, attributes):
-    # Check if parent made sampling decision
-    if span_context.trace_flags & SAMPLED_FLAG:
-        return True
-    
-    # Apply local sampling rules
-    if attributes.get("error"):
-        return True
-    
-    if attributes.get("cost_usd", 0) > 0.01:
-        return True
-    
-    # Default sampling rate
-    return random.random() < 0.1
-```
-
-## Cost Attribution
-
-### Cost Calculation Model
-```python
-# cost_calculator.py
-class CostCalculator:
-    """Calculate cost_usd for different operations"""
-    
-    # Base costs per operation type
-    COSTS = {
-        "api_call": 0.00001,
-        "database_query": 0.00002,
-        "ml_inference": 0.0001,
-        "robot_actuation": 0.001,
-        "storage_read": 0.000001,
-        "storage_write": 0.000005,
-    }
-    
-    @classmethod
-    def calculate_span_cost(cls, span):
-        """Calculate cost for a span"""
-        operation = span.attributes.get("operation_type")
-        base_cost = cls.COSTS.get(operation, 0.00001)
-        
-        # Adjust for duration
-        duration_ms = span.end_time - span.start_time
-        duration_factor = duration_ms / 100  # Per 100ms
-        
-        # Adjust for data size
-        data_size = span.attributes.get("data_size_bytes", 0)
-        data_factor = data_size / (1024 * 1024)  # Per MB
-        
-        total_cost = base_cost * (1 + duration_factor * 0.1 + data_factor * 0.01)
-        
-        return round(total_cost, 6)
-```
-
-### Cost Aggregation
-```python
-# Aggregate costs across trace
-def aggregate_trace_cost(trace_id):
-    spans = get_spans_for_trace(trace_id)
-    total_cost = sum(span.attributes.get("cost_usd", 0) for span in spans)
-    
-    # Store aggregated cost
-    store_trace_cost(trace_id, total_cost)
-    
-    # Alert if exceeds threshold
-    if total_cost > 0.1:
-        alert_high_cost_operation(trace_id, total_cost)
-    
-    return total_cost
-```
-
-## Trace Storage & Retention
-
-### Storage Strategy
-```yaml
-trace_storage:
-  # Hot storage (immediate access)
-  hot:
-    duration: 24h
-    backend: redis
-    full_fidelity: true
-  
-  # Warm storage (quick retrieval)
-  warm:
-    duration: 7d
-    backend: elasticsearch
-    sampling: 0.1  # Keep 10% of traces
-    
-  # Cold storage (archival)
-  cold:
-    duration: 30d
-    backend: s3
-    compression: zstd
-    sampling: 0.01  # Keep 1% of traces
-```
-
-### Trace Data Classification
-```python
-def classify_trace_data(span):
-    """Classify trace data for retention policy"""
-    
-    # Check for PII
-    if has_pii_attributes(span):
-        span.set_attribute("data_tag", "PII")
-        span.set_attribute("retention_days", 30)
-    
-    # Check for sensitive data
-    elif has_sensitive_attributes(span):
-        span.set_attribute("data_tag", "SENSITIVE")
-        span.set_attribute("retention_days", 90)
-    
-    # Default classification
-    else:
-        span.set_attribute("data_tag", "EXPORT_OK")
-        span.set_attribute("retention_days", 365)
-```
-
-## Integration Points
-
-### Service Mesh Integration
-```yaml
-# Istio/Envoy configuration
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: envoy-tracing-config
-data:
-  tracing.yaml: |
-    tracing:
-      http:
-        name: envoy.tracers.opentelemetry
-        typed_config:
-          "@type": type.googleapis.com/envoy.config.trace.v3.OpenTelemetryConfig
-          grpc_service:
-            envoy_grpc:
-              cluster_name: otel-collector
-          service_name: "{{ SERVICE_NAME }}"
-          # Propagate cost_usd in baggage
-          propagation:
-            baggage:
-              - "cost_usd"
-              - "data_tag"
-```
-
-### Application Framework Integration
-
-#### Spring Boot (Java)
-```java
-@Component
-public class CostTracingInterceptor implements ClientHttpRequestInterceptor {
-    
-    @Override
-    public ClientHttpResponse intercept(HttpRequest request, byte[] body, 
-                                       ClientHttpRequestExecution execution) {
-        Span span = tracer.currentSpan();
-        
-        // Add cost attribution
-        span.tag("cost_usd", calculateCost(request, body));
-        span.tag("data_tag", classifyData(body));
-        
-        // Propagate trace context
-        tracer.inject(span.context(), Format.HTTP_HEADERS, 
-                     new HttpHeadersCarrier(request.getHeaders()));
-        
-        return execution.execute(request, body);
-    }
-}
-```
-
-#### Express.js (Node.js)
-```javascript
-const { trace, context, propagation } = require('@opentelemetry/api');
-
-// Middleware for trace propagation and cost attribution
-app.use((req, res, next) => {
-  const tracer = trace.getTracer('express-app');
-  const parentContext = propagation.extract(context.active(), req.headers);
-  
-  const span = tracer.startSpan('http_request', {
-    attributes: {
-      'http.method': req.method,
-      'http.url': req.url,
-      'cost_usd': 0.00001,
-      'data_tag': classifyRequest(req)
-    }
-  }, parentContext);
-  
-  // Propagate to response
-  res.on('finish', () => {
-    span.setAttribute('http.status_code', res.statusCode);
-    span.setAttribute('cost_usd', calculateFinalCost(req, res));
-    span.end();
-  });
-  
-  next();
-});
-```
-
-## Monitoring & Alerting
-
-### Trace-based Alerts
-```yaml
-# trace_alerts.yaml
-alerts:
-  - name: "Orphaned Spans"
-    query: "traces without parent_id and not root"
-    threshold: 100
-    window: 5m
-    severity: warning
-    
-  - name: "Trace Cost Anomaly"
-    query: "sum(cost_usd) by trace_id > 0.1"
-    threshold: 1
-    window: 1m
-    severity: critical
-    
-  - name: "Missing Cost Attribution"
-    query: "spans without cost_usd attribute"
-    threshold: 1000
-    window: 10m
-    severity: warning
-    
-  - name: "Trace Depth Exceeded"
-    query: "trace depth > 50"
-    threshold: 1
-    window: 5m
-    severity: warning
-```
-
-### Dashboard Queries
+### Total Cost by Trace
 ```sql
--- Top expensive traces
 SELECT 
   trace_id,
   SUM(cost_usd) as total_cost,
   COUNT(*) as span_count,
-  MAX(duration_ms) as max_duration
+  MAX(end_time) - MIN(start_time) as duration_ms
 FROM spans
-WHERE timestamp > NOW() - INTERVAL '1 hour'
-GROUP BY trace_id
+WHERE trace_id = '7d3f4e8a9b2c1d5e6f7a8b9c0d1e2f3a'
+GROUP BY trace_id;
+```
+
+### Cost Breakdown by Service
+```sql
+SELECT 
+  trace_id,
+  service,
+  capability,
+  SUM(cost_usd) as service_cost
+FROM spans
+WHERE trace_id = '7d3f4e8a9b2c1d5e6f7a8b9c0d1e2f3a'
+GROUP BY trace_id, service, capability
+ORDER BY service_cost DESC;
+```
+
+### Top Expensive Traces (Last Hour)
+```sql
+SELECT 
+  trace_id,
+  tenant,
+  SUM(cost_usd) as total_cost,
+  MIN(start_time) as trace_start
+FROM spans
+WHERE start_time > NOW() - INTERVAL '1 hour'
+GROUP BY trace_id, tenant
+HAVING SUM(cost_usd) > 0.01
 ORDER BY total_cost DESC
 LIMIT 10;
-
--- Cost by service
-SELECT 
-  service_name,
-  SUM(cost_usd) as total_cost,
-  AVG(cost_usd) as avg_cost,
-  COUNT(*) as operation_count
-FROM spans
-WHERE timestamp > NOW() - INTERVAL '1 day'
-GROUP BY service_name
-ORDER BY total_cost DESC;
-
--- Data classification distribution
-SELECT 
-  data_tag,
-  COUNT(*) as span_count,
-  SUM(cost_usd) as total_cost
-FROM spans
-WHERE timestamp > NOW() - INTERVAL '1 hour'
-GROUP BY data_tag;
 ```
-
-## Troubleshooting
-
-### Common Issues
-
-#### Lost Trace Context
-```bash
-# Debug script to verify trace propagation
-curl -H "traceparent: 00-${TRACE_ID}-${PARENT_ID}-01" \
-     -H "tracestate: cost_usd=0.001" \
-     -v http://service/api/endpoint
-
-# Check if trace context is logged
-grep "trace_id=${TRACE_ID}" /var/log/application.log
-```
-
-#### High Sampling Overhead
-```python
-# Optimize sampling decision caching
-@lru_cache(maxsize=10000)
-def get_sampling_decision(trace_id):
-    """Cache sampling decisions to reduce overhead"""
-    return should_sample(trace_id)
-```
-
-#### Cost Attribution Drift
-```sql
--- Audit query to find cost discrepancies
-WITH trace_costs AS (
-  SELECT 
-    trace_id,
-    SUM(cost_usd) as calculated_cost
-  FROM spans
-  GROUP BY trace_id
-)
-SELECT 
-  t.trace_id,
-  t.calculated_cost,
-  m.recorded_cost,
-  ABS(t.calculated_cost - m.recorded_cost) as drift
-FROM trace_costs t
-JOIN trace_metadata m ON t.trace_id = m.trace_id
-WHERE ABS(t.calculated_cost - m.recorded_cost) > 0.001
-ORDER BY drift DESC;
-```
-
-## Performance Considerations
-
-### Overhead Targets
-- **CPU Overhead:** < 1% for instrumentation
-- **Memory Overhead:** < 50MB per service
-- **Network Overhead:** < 0.1% additional traffic
-- **Latency Impact:** < 1ms per span
-
-### Optimization Strategies
-1. **Batch span exports:** Group spans in batches of 100-1000
-2. **Compress trace data:** Use protobuf/gzip for wire format
-3. **Local span aggregation:** Pre-aggregate metrics locally
-4. **Sampling at edge:** Make sampling decisions early
-5. **Async processing:** Use background threads for export

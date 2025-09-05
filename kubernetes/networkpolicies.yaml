@@ -1,0 +1,412 @@
+# NetworkPolicies for Zero-Trust Network Security
+# Default deny-all with specific allow rules for required communication
+---
+# Default deny-all ingress and egress for default namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: default
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+---
+# Allow DNS resolution for all pods (required for service discovery)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-access
+  namespace: default
+spec:
+  podSelector: {}
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: coredns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+---
+# Allow intra-namespace communication for microservices
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-same-namespace
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      networking/internal: "true"
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          networking/internal: "true"
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          networking/internal: "true"
+---
+# Allow specific pods to access egress proxy for external communication
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-proxy-access
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      networking/allow-egress: "true"
+  policyTypes:
+  - Egress
+  egress:
+  # Allow DNS first
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  # Allow access to egress proxy
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: egress-system
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: egress-proxy
+    ports:
+    - protocol: TCP
+      port: 3128
+---
+# Allow ingress from ingress controllers/load balancers
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-controller
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      networking/allow-ingress: "true"
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 8080
+    - protocol: TCP
+      port: 8443
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: istio-system
+      podSelector:
+        matchLabels:
+          app: istio-ingressgateway
+    ports:
+    - protocol: TCP
+      port: 8080
+    - protocol: TCP
+      port: 8443
+---
+# NetworkPolicy for egress-system namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: egress-proxy-network-policy
+  namespace: egress-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: egress-proxy
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow ingress from any pod that needs external access
+  - from:
+    - namespaceSelector: {}
+      podSelector:
+        matchLabels:
+          networking/allow-egress: "true"
+    ports:
+    - protocol: TCP
+      port: 3128
+  egress:
+  # Allow DNS for domain resolution
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  # Allow external HTTPS/HTTP traffic (actual proxy function)
+  - to:
+    - podSelector: {}
+    ports:
+    - protocol: TCP
+      port: 80
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 8080
+    - protocol: TCP
+      port: 8443
+  # Allow all external IPs for proxied traffic
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.0.0.0/8      # Kubernetes internal
+        - 172.16.0.0/12   # Docker internal
+        - 192.168.0.0/16  # Private networks
+        - 169.254.0.0/16  # Link-local
+    ports:
+    - protocol: TCP
+      port: 80
+    - protocol: TCP
+      port: 443
+---
+# Allow metrics scraping from Prometheus
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scraping
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      monitoring/prometheus-scrape: "true"
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: prometheus
+    ports:
+    - protocol: TCP
+      port: 9090
+    - protocol: TCP
+      port: 8080
+---
+# Allow health check probes from kubelet
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-kubelet-probes
+  namespace: default
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  ingress:
+  # Kubelet runs on the host network
+  - from:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+    ports:
+    - protocol: TCP
+      port: 8080  # Health check port
+    - protocol: TCP
+      port: 8081  # Readiness port
+---
+# NetworkPolicy for production namespace with stricter controls
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: production-strict-policy
+  namespace: production
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  egress:
+  # Allow DNS
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  # Allow internal service mesh communication
+  - to:
+    - podSelector:
+        matchLabels:
+          networking/service-mesh: "enabled"
+  # Allow egress proxy for external (must be explicitly labeled)
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: egress-system
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: egress-proxy
+    ports:
+    - protocol: TCP
+      port: 3128
+  ingress:
+  # Allow from service mesh only
+  - from:
+    - podSelector:
+        matchLabels:
+          networking/service-mesh: "enabled"
+  # Allow from API gateway
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: api-gateway
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: gateway
+---
+# NetworkPolicy for agent namespace (matching architecture's agent requirements)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-network-policy
+  namespace: agents
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: agent
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow from orchestrator/controller only
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: control-plane
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: orchestrator
+    ports:
+    - protocol: TCP
+      port: 8080
+  egress:
+  # Allow DNS
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  # Allow to message queue/event bus
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: messaging
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: event-bus
+    ports:
+    - protocol: TCP
+      port: 5672  # AMQP
+    - protocol: TCP
+      port: 9092  # Kafka
+  # Allow to state store
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: data-plane
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: state-store
+    ports:
+    - protocol: TCP
+      port: 6379  # Redis
+    - protocol: TCP
+      port: 5432  # PostgreSQL
+  # MUST use egress proxy for external tools/APIs
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: egress-system
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: egress-proxy
+    ports:
+    - protocol: TCP
+      port: 3128
+---
+# Deny direct external egress (catch-all to ensure proxy usage)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-external-egress
+  namespace: default
+spec:
+  podSelector:
+    matchExpressions:
+    - key: networking/allow-egress
+      operator: NotIn
+      values: ["true"]
+  policyTypes:
+  - Egress
+  egress:
+  # Only allow cluster-internal traffic
+  - to:
+    - namespaceSelector: {}
+  - to:
+    - podSelector: {}
+  - to:
+    - ipBlock:
+        cidr: 10.0.0.0/8
+  - to:
+    - ipBlock:
+        cidr: 172.16.0.0/12
+  - to:
+    - ipBlock:
+        cidr: 192.168.0.0/16

@@ -1,223 +1,162 @@
-# Router Policy Configuration
+# control_plane/router_policy.yaml
 version: "1.0"
-updated_at: "2024-01-01T00:00:00Z"
-
-# Default routing configuration
-defaults:
-  primary_model: "o4-mini"  # Can be overridden by feature flag
-  timeout_seconds: 30
-  retry_attempts: 3
-  fallback_enabled: true
-
-# Domain-specific routing policies
-domain_policies:
-  robotics:
-    description: "High-stakes physical robot control"
-    primary_model: "rt-2"
-    secondary_models: ["o4", "gemini-2.5-pro"]
-    requirements:
-      hitl_gate: true
-      safety_check: true
-      capability_required: ["robot.actuate", "robot.plan"]
-    constraints:
-      max_latency_ms: 100
-      min_confidence_score: 0.95
+policies:
+  - name: "robotics_safety_policy"
+    priority: 100
+    match:
+      operation: ["actuate", "robot_control"]
+      tags:
+        - robotics
+        - physical_automation
     guardrails:
-      - type: "safety_boundary"
-        params:
-          max_velocity: 1.0
-          workspace_limits: true
-      - type: "collision_detection"
-        enabled: true
-    error_budget:
-      threshold_per_hour: 5
-      action: "fallback"  # or "block"
-
-  simulation:
-    description: "Compute-intensive simulation workloads"
-    primary_model: "gemini-2.5-pro"
-    secondary_models: ["gemini-2-flash", "o4-mini"]
-    requirements:
-      hitl_gate: false
-      capability_required: ["sim.run", "sim.modify"]
-    constraints:
-      max_context_tokens: 128000
-      max_compute_time_seconds: 300
+      rate_limit_hz: 10  # Maximum 10 operations per second
+      require_hitl: true
+      require_approval_count: 1
+      max_retry_attempts: 3
+      timeout_seconds: 30
+      safety_checks:
+        - emergency_stop_available
+        - collision_detection_enabled
+        - operator_present
+    fallbacks:
+      - simulation_mode
+      - manual_override
+    policy_mode: enforce
+    
+  - name: "high_risk_operations"
+    priority: 90
+    match:
+      operation: ["commit", "deploy", "delete"]
+      environment: ["production", "staging"]
     guardrails:
-      - type: "resource_limits"
-        params:
-          max_memory_gb: 32
-          max_cpu_cores: 16
-    error_budget:
-      threshold_per_hour: 20
-      action: "alert"
-
-  appdev:
-    description: "Application development assistance"
-    tiers:
-      basic:
-        primary_model: "gpt-4"
-        secondary_models: ["gpt-3.5-turbo"]
-        rate_limit_per_hour: 100
-        max_tokens: 4096
-      standard:
-        primary_model: "o4-mini"
-        secondary_models: ["gpt-4"]
-        rate_limit_per_hour: 500
-        max_tokens: 8192
-      premium:
-        primary_model: "o4"
-        secondary_models: ["o4-mini", "claude-3-opus"]
-        rate_limit_per_hour: 1000
-        max_tokens: 32768
-    requirements:
-      capability_required: ["llm.generate", "repo.read"]
+      rate_limit_hz: 5
+      require_hitl: true
+      require_approval_count: 2
+      approval_timeout_minutes: 30
+      audit_log: true
+    fallbacks:
+      - dry_run
+      - rollback_available
+    policy_mode: enforce
+    
+  - name: "data_processing"
+    priority: 50
+    match:
+      operation: ["analyze", "transform"]
+      data_size_gb:
+        min: 0
+        max: 100
     guardrails:
-      - type: "code_safety"
-        params:
-          scan_vulnerabilities: true
-          block_malicious: true
-
-  research:
-    description: "Research and analysis tasks"
-    primary_model: "o4-mini"
-    secondary_models: ["claude-3", "gpt-4"]
-    requirements:
-      capability_required: ["llm.generate", "data.read"]
-    constraints:
-      max_context_tokens: 100000
-      allow_web_search: true
+      rate_limit_hz: 100
+      require_hitl: false
+      max_parallel_executions: 10
+      memory_limit_gb: 32
+    fallbacks:
+      - sampling_mode
+      - incremental_processing
+    policy_mode: monitor
+    
+  - name: "development_bypass"
+    priority: 10
+    match:
+      environment: ["development", "test"]
+      user_role: ["developer", "tester"]
     guardrails:
-      - type: "pii_filter"
-        enabled: true
-      - type: "citation_check"
-        enabled: true
+      rate_limit_hz: 1000
+      require_hitl: false
+    fallbacks: []
+    policy_mode: bypass
 
-# Capability-based routing rules
-capability_routing:
-  repo.commit:
-    preferred_models: ["o4", "gpt-4"]
-    require_review: true
+guardrail_definitions:
+  rate_limit_hz:
+    description: "Maximum operations per second"
+    type: integer
+    min: 1
+    max: 10000
+    default: 100
     
-  robot.actuate:
-    preferred_models: ["rt-2"]
-    require_hitl: true
+  require_hitl:
+    description: "Require human-in-the-loop approval"
+    type: boolean
+    default: false
     
-  llm.generate:
-    preferred_models: ["o4-mini", "gpt-4", "claude-3"]
-    load_balance: true
+  require_approval_count:
+    description: "Number of approvals required"
+    type: integer
+    min: 1
+    max: 5
+    default: 1
     
-  data.read:
-    preferred_models: ["gpt-4", "claude-3"]
-    cache_enabled: true
+  timeout_seconds:
+    description: "Operation timeout in seconds"
+    type: integer
+    min: 1
+    max: 3600
+    default: 300
+    
+  safety_checks:
+    description: "Required safety checks before operation"
+    type: array
+    items:
+      type: string
+      enum:
+        - emergency_stop_available
+        - collision_detection_enabled
+        - operator_present
+        - backup_system_online
+        - monitoring_active
 
-# Fallback policies
-fallback_policies:
-  model_unavailable:
-    strategy: "sequential"  # or "random", "least_loaded"
-    max_attempts: 3
-    backoff_multiplier: 2.0
+fallback_strategies:
+  simulation_mode:
+    description: "Run in simulation without physical effects"
+    type: action
+    implementation: "redirect_to_simulator"
     
-  rate_limit_exceeded:
-    strategy: "exponential_backoff"
-    initial_delay_ms: 1000
-    max_delay_ms: 60000
+  manual_override:
+    description: "Switch to manual control"
+    type: action
+    implementation: "notify_operator"
     
-  budget_exceeded:
-    strategy: "block"
-    notification_channels: ["email", "slack"]
+  dry_run:
+    description: "Execute without committing changes"
+    type: action
+    implementation: "execute_readonly"
     
-  hitl_timeout:
-    strategy: "escalate"
-    timeout_seconds: 300
-    escalation_path: ["operator", "supervisor", "auto_deny"]
-
-# Guardrails configuration
-guardrails:
-  global:
-    - type: "content_filter"
-      params:
-        block_pii: true
-        block_harmful: true
-        
-    - type: "rate_limiter"
-      params:
-        global_rpm: 10000
-        per_tenant_rpm: 1000
-        
-    - type: "budget_monitor"
-      params:
-        daily_limit_usd: 10000
-        alert_threshold_pct: 80
-        
-  robotics_specific:
-    - type: "safety_monitor"
-      params:
-        emergency_stop: true
-        human_override: true
-        
-    - type: "trajectory_validator"
-      params:
-        check_collisions: true
-        verify_limits: true
-
-# Error budgets
-error_budgets:
-  global:
-    slo_target: 99.9
-    error_budget_minutes_per_month: 43.2
+  rollback_available:
+    description: "Ensure rollback mechanism is ready"
+    type: check
+    implementation: "verify_rollback_capability"
     
-  per_domain:
-    robotics:
-      slo_target: 99.99
-      error_budget_minutes_per_month: 4.32
-      
-    simulation:
-      slo_target: 99.5
-      error_budget_minutes_per_month: 216
-      
-    appdev:
-      slo_target: 99.9
-      error_budget_minutes_per_month: 43.2
+  sampling_mode:
+    description: "Process subset of data"
+    type: action
+    implementation: "enable_sampling"
+    
+  incremental_processing:
+    description: "Process in smaller chunks"
+    type: action
+    implementation: "enable_chunking"
 
-# Load balancing configuration
-load_balancing:
-  strategy: "weighted_round_robin"
-  health_check_interval_seconds: 30
-  weights:
-    o4: 10
-    o4-mini: 30
-    gpt-4: 20
-    deepseek-v3: 15
-    gemini-2.5-pro: 15
-    rt-2: 10
+policy_modes:
+  enforce:
+    description: "Strictly enforce all guardrails"
+    block_on_violation: true
+    log_violations: true
+    
+  monitor:
+    description: "Log violations but allow execution"
+    block_on_violation: false
+    log_violations: true
+    alert_on_violation: true
+    
+  bypass:
+    description: "Skip policy checks (requires privileges)"
+    block_on_violation: false
+    log_violations: false
+    require_privilege: "policy_bypass"
 
-# Monitoring and alerting
-monitoring:
-  metrics_enabled: true
-  trace_sampling_rate: 0.1
-  log_level: "info"
-  
-  alerts:
-    - name: "high_error_rate"
-      condition: "error_rate > 0.05"
-      window_minutes: 5
-      channels: ["pagerduty", "slack"]
-      
-    - name: "budget_warning"
-      condition: "daily_spend > daily_limit * 0.8"
-      channels: ["email", "slack"]
-      
-    - name: "hitl_queue_backup"
-      condition: "hitl_queue_size > 100"
-      channels: ["slack"]
-
-# A/B testing configuration
-ab_tests:
-  - name: "new_router_algorithm"
-    enabled: false
-    percentage: 10
-    variants:
-      control: "current_algorithm"
-      treatment: "ml_based_routing"
-    metrics: ["latency", "success_rate", "cost"]
+metadata:
+  schema_version: "1.0.0"
+  last_updated: "2024-01-15T00:00:00Z"
+  author: "system"
+  description: "Router policies with robotics rate limiting"
